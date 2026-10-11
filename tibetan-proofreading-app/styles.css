@@ -1358,6 +1358,10 @@ body.is-resizing-panes * {
   letter-spacing: 0;
 }
 
+#ocrText {
+  font-size: var(--ocr-font-size, 22px);
+}
+
 .is-hidden {
   display: none !important;
 }
@@ -1381,7 +1385,7 @@ body.is-resizing-panes * {
   gap: 4px;
 }
 
-.font-size-controls + .view-switch {
+.view-switch + .font-size-controls {
   margin-left: 0;
 }
 
@@ -2601,7 +2605,16 @@ body.is-resizing-panes * {
 }
 
 .app-shell.workbench-mode #workbenchView .font-size-controls {
-  display: none;
+  flex: 0 0 auto;
+  margin-left: 0;
+}
+
+.app-shell.workbench-mode #workbenchView .font-size-button {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
 }
 
 /* Keep the source-pane toggle in the header only in the translation workflow. */

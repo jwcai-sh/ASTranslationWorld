@@ -293,13 +293,19 @@
               <i data-lucide="file-down"></i>
               <span>Markdown</span>
             </button>
-            <div class="font-size-controls" role="group" aria-label="OCR 与校对字体大小">
+            <div id="ocrViewSwitch" class="view-switch" role="group" aria-label="OCR 结果显示方式">
+              <button id="proofreadViewButton" class="view-switch-button" type="button">校对</button>
+              <button id="compareViewButton" class="view-switch-button" type="button">对照</button>
+              <button id="lineViewButton" class="view-switch-button active" type="button">逐行</button>
+              <button id="textViewButton" class="view-switch-button" type="button">文本</button>
+            </div>
+            <div class="font-size-controls" role="group" aria-label="右栏识别文字大小">
               <button
                 id="decreaseOcrFontButton"
                 class="icon-button compact font-size-button"
                 type="button"
-                aria-label="减小 OCR 与校对字体"
-                title="减小 OCR 与校对字体"
+                aria-label="缩小右栏识别文字"
+                title="缩小右栏识别文字"
               >
                 <span class="font-size-glyph" aria-hidden="true">A</span>
                 <i data-lucide="minus"></i>
@@ -308,18 +314,12 @@
                 id="increaseOcrFontButton"
                 class="icon-button compact font-size-button"
                 type="button"
-                aria-label="增大 OCR 与校对字体"
-                title="增大 OCR 与校对字体"
+                aria-label="放大右栏识别文字"
+                title="放大右栏识别文字"
               >
                 <span class="font-size-glyph" aria-hidden="true">A</span>
                 <i data-lucide="plus"></i>
               </button>
-            </div>
-            <div id="ocrViewSwitch" class="view-switch" role="group" aria-label="OCR 结果显示方式">
-              <button id="proofreadViewButton" class="view-switch-button" type="button">校对</button>
-              <button id="compareViewButton" class="view-switch-button" type="button">对照</button>
-              <button id="lineViewButton" class="view-switch-button active" type="button">逐行</button>
-              <button id="textViewButton" class="view-switch-button" type="button">文本</button>
             </div>
             <div id="batchOcrProgress" class="review-feedback" role="status" aria-live="polite"></div>
             <button class="pane-collapse-button" type="button" data-collapse-pane="ocr" aria-label="折叠 OCR 栏" title="折叠 OCR 栏">

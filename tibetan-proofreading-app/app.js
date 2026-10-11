@@ -1846,12 +1846,13 @@ function setOcrFontSize(size, persist = true) {
     OCR_FONT_SIZE_MIN,
     OCR_FONT_SIZE_MAX,
   );
-  document.documentElement.style.setProperty("--ocr-font-size", `${state.ocrFontSize}px`);
-  document.documentElement.style.setProperty("--proofread-ocr-font-size", `${state.ocrFontSize}px`);
+  const ocrPane = els.ocrLineCompare.closest(".ocr-pane");
+  ocrPane.style.setProperty("--ocr-font-size", `${state.ocrFontSize}px`);
+  ocrPane.style.setProperty("--proofread-ocr-font-size", `${state.ocrFontSize}px`);
   els.decreaseOcrFontButton.disabled = state.ocrFontSize <= OCR_FONT_SIZE_MIN;
   els.increaseOcrFontButton.disabled = state.ocrFontSize >= OCR_FONT_SIZE_MAX;
-  els.decreaseOcrFontButton.title = `减小 OCR / 校对字体（当前 ${state.ocrFontSize}px）`;
-  els.increaseOcrFontButton.title = `增大 OCR / 校对字体（当前 ${state.ocrFontSize}px）`;
+  els.decreaseOcrFontButton.title = `缩小右栏识别文字（当前 ${state.ocrFontSize}px）`;
+  els.increaseOcrFontButton.title = `放大右栏识别文字（当前 ${state.ocrFontSize}px）`;
   els.ocrLineCompare.querySelectorAll(".ocr-line-editor, .proofread-editor").forEach(resizeLineEditor);
   if (persist) {
     window.localStorage.setItem(OCR_FONT_SIZE_KEY, String(state.ocrFontSize));
