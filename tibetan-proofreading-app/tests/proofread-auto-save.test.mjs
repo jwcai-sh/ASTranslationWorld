@@ -81,3 +81,21 @@ test("Gemini error marks save immediately with updated quality stats", () => {
   assert.equal(saved.ocrResults["1"].compare.sharedErrors.length, 1);
   assert.equal(saved.ocrQualityReviews[0].errorChars, 1);
 });
+
+test("manually transcribed failed Gemini line becomes an adoptable saved candidate", () => {
+  const { context, storage } = setup();
+  vm.runInContext(`
+    const result = state.ocrResults.get(1);
+    result.compare.llm.lines[0] = {
+      text:'〔本行识别失败，待重新识别〕', error:true, missing:true,
+      diagnostic:true, recognitionError:'timed out',
+    };
+    updateProofreadCompareLine('llm', 0, 'མི་རྟག་', {...result.compare.llm.lines[0]}, null);
+  `, context);
+  const saved = JSON.parse(storage.get("auto-save-check")).ocrResults["1"];
+  assert.equal(saved.compare.llm.lines[0].text, "མི་རྟག་");
+  assert.equal(saved.compare.llm.lines[0].diagnostic, false);
+  assert.equal(saved.compare.llm.lines[0].missing, false);
+  assert.equal(saved.compare.llm.lines[0].recognitionError, "");
+  assert.equal(saved.text, "བོད་");
+});

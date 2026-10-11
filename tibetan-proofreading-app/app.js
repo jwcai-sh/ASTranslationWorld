@@ -6584,6 +6584,12 @@ function updateProofreadCompareLine(side, index, value, line, peerLine) {
   const targetLine = ensureProofreadLine(compare[sideKey].lines, index, getSourceLineForRow(line, peerLine));
   const previousText = String(targetLine.text || "");
   targetLine.text = normalizedValue;
+  if (normalizedValue.trim()) {
+    targetLine.error = false;
+    targetLine.missing = false;
+    targetLine.diagnostic = false;
+    targetLine.recognitionError = "";
+  }
   updateManualEditTracking(targetLine, normalizedValue, targetLine.manualBaselineText ?? previousText);
   if (line) {
     line.text = normalizedValue;
