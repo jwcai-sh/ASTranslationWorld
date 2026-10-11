@@ -14,8 +14,13 @@ const sourceRowsEnd = app.indexOf("function renderOcrSourceColumn(", sourceRowsS
 assert.notEqual(sourceRowsStart, -1, "the line view must have source rows");
 assert.match(
   app.slice(sourceRowsStart, sourceRowsEnd),
-  /renderAiVisionLineReviewButton/,
-  "the active 逐行 view must expose the line-review action without switching to 校对"
+  /const showLineReview = !line\.deleted && \(side === "bdrc" \|\| isAiOnlyMode\(\)\)/,
+  "eligible OCR source rows must expose independent review actions"
+);
+assert.match(
+  app.slice(sourceRowsStart, sourceRowsEnd),
+  /renderQwenLineReview\([\s\S]*renderOpenAiLineReview\([\s\S]*row\.append\(number, text, actions\)/,
+  "the active row view must attach the available model review actions to each eligible row"
 );
 assert.match(server, /"\/line-review"/, "the AI OCR server must expose a dedicated line-review route");
 assert.match(server, /def prepare_line_review_images\(/, "the server must tightly crop and enlarge the selected source line");

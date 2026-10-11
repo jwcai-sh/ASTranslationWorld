@@ -60,14 +60,29 @@ class ProviderReviewTests(unittest.TestCase):
         self.assertEqual(server.resolve_saved_review_bbox(out.getvalue(), current, metadata), current)
 
     def test_qwen_preserves_selected_model_and_crop(self):
+        from io import BytesIO
+        from PIL import Image
+        import base64
+        page = Image.new('RGB', (800, 240), 'white')
+        page.putpixel((400, 116), (175, 175, 175))
+        output = BytesIO(); page.save(output, format='PNG')
+        target = {'x': .1, 'y': .25, 'width': .8, 'height': .25}
         raw = {'model': 'qwen3.7-plus', 'choices': [{'finish_reason': 'stop', 'message': {'content': 'བོད་'}}]}
-        with patch.object(server, 'QWEN_REVIEW_API_KEY', 'test-only'), patch.object(server, 'QWEN_REVIEW_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1'), patch.object(server, 'prepare_line_review_images', return_value=([b'png'], {'crop': 'tight'})), patch.object(server, 'post_json', return_value=raw) as request:
-            result = server.call_qwen_line_review(b'page', 'page.png', {'x': .1}, 'qwen3.7-plus')
+        with patch.object(server, 'QWEN_REVIEW_API_KEY', 'test-only'), patch.object(server, 'QWEN_REVIEW_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1'), patch.object(server, 'prepare_line_review_images', return_value=([b'png'], {'crop': 'tight', 'source_bbox': target})), patch.object(server, 'post_json', return_value=raw) as request:
+            result = server.call_qwen_line_review(output.getvalue(), 'page.png', target, 'qwen3.7-plus')
             url, body, key = request.call_args.args
             self.assertTrue(url.endswith('/chat/completions'))
             self.assertEqual(body['model'], 'qwen3.7-plus')
             self.assertFalse(body['enable_thinking'])
             self.assertEqual(body['messages'][0]['content'][1]['max_pixels'], 8388608)
+            content = body['messages'][0]['content']
+            self.assertEqual(len(content), 4)  # prompt, page, raw wide band, row tile
+            self.assertIn('重叠文字只转录一次', content[0]['text'])
+            wide = Image.open(BytesIO(base64.b64decode(content[2]['image_url']['url'].split(',', 1)[1])))
+            local_bbox = result['review_context']['local_bbox']
+            self.assertLess(local_bbox['y'], round(target['y'] * page.height))
+            self.assertGreater(local_bbox['y'] + local_bbox['height'], round((target['y'] + target['height']) * page.height))
+            self.assertEqual(wide.getpixel((400 - local_bbox['x'], 116 - local_bbox['y'])), (175, 175, 175))
             self.assertEqual(result['provider'], 'qwen')
             self.assertEqual(result['review_image']['crop'], 'tight')
             self.assertEqual(result['text'], 'བོད་')
@@ -85,7 +100,7 @@ class ProviderReviewTests(unittest.TestCase):
             request.assert_not_called()
 
     def test_truncated_qwen_is_rejected(self):
-        with patch.object(server, 'QWEN_REVIEW_API_KEY', 'test-only'), patch.object(server, 'QWEN_REVIEW_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1'), patch.object(server, 'prepare_line_review_images', return_value=([b'png'], {})), patch.object(server, 'post_json', return_value={'choices': [{'finish_reason': 'length', 'message': {'content': 'བོད་'}}]}):
+        with patch.object(server, 'QWEN_REVIEW_API_KEY', 'test-only'), patch.object(server, 'QWEN_REVIEW_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1'), patch.object(server, 'prepare_line_review_images', return_value=([b'png'], {})), patch.object(server, 'prepare_qwen_review_context', return_value=([b'page', b'local'], {})), patch.object(server, 'post_json', return_value={'choices': [{'finish_reason': 'length', 'message': {'content': 'བོད་'}}]}):
             with self.assertRaisesRegex(RuntimeError, '完整'):
                 server.call_qwen_line_review(b'', '', {}, 'qwen3.8-max')
 

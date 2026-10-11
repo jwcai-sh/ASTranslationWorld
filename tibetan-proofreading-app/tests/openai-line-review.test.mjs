@@ -19,7 +19,7 @@ vm.runInContext(`
   getAiVisionLineReviewEndpoint=()=> 'http://localhost/line-review';
   getCurrentPageImageBlob=async()=>({});
   makeLineCropContext=()=>({cacheKey:state.cacheKey,pageNum:state.pageNum});
-  getCachedLineCrop=async()=>({payload:{review_image:{crop_version:2}}});
+  getCachedLineCrop=async()=>({payload:{review_image:{crop_version:14}}});
   saveModelInputCrop=async()=>{};
   callAiVisionLineReviewEndpoint=async(endpoint,blob,bbox,draft)=> {
     if(!endpoint.endsWith('/openai-line-review') || draft!=='') throw Error('bad routing');

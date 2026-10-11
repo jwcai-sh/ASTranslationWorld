@@ -23,7 +23,7 @@ vm.runInContext(`
   getAiVisionLineReviewEndpoint=()=> 'http://localhost/line-review';
   getCurrentPageImageBlob=async()=>({});
   makeLineCropContext=()=>({cacheKey:state.cacheKey,pageNum:state.pageNum});
-  getCachedLineCrop=async()=>({payload:{review_image:{crop_version:2}}});
+  getCachedLineCrop=async()=>({payload:{review_image:{crop_version:14}}});
   saveModelInputCrop=async()=>{};
   callAiVisionLineReviewEndpoint=async(endpoint,blob,bbox,draft,model)=> {
     if(!endpoint.endsWith('/qwen-line-review') || draft!=='' || model!=='qwen3.7-plus') throw Error('bad provider/model routing');
@@ -49,10 +49,10 @@ const selectors = elements.filter(node => node['aria-label']?.includes('千问�
 assert.equal(selectors.at(-1).value, 'qwen3.7-plus');
 vm.runInContext("els.ocrText={value:''}; updateThumbnailState=()=>{}; saveProofreadBlockChoice(0,'qwen',null)",ctx);
 assert.equal(vm.runInContext('state.ocrResults.get(1).text',ctx), 'བོད་');
-assert.equal(vm.runInContext('state.ocrResults.get(1).compare.llm.lines[0].provider',ctx), 'qwen');
-assert.equal(vm.runInContext('getEffectiveOcrSideLines(state.ocrResults.get(1).compare.llm)[0].provider',ctx), 'qwen');
+assert.equal(vm.runInContext('state.ocrResults.get(1).compare.llm.lines[0].text',ctx), 'Gemini');
+assert.equal(vm.runInContext('getEffectiveOcrSideLines(state.ocrResults.get(1).compare.llm)[0].text',ctx), 'Gemini');
 vm.runInContext('restoreCachedResults()',ctx);
-assert.equal(vm.runInContext('state.ocrResults.get(1).compare.llm.lines[0].provider',ctx), 'qwen');
+assert.equal(vm.runInContext('state.ocrResults.get(1).compare.llm.lines[0].text',ctx), 'Gemini');
 console.log('Qwen model routing, independent cache, adoption and refresh passed');
 
 assert.equal(vm.runInContext("validateIndependentReviewText('```text\\nབོད་\\n```')", ctx), 'བོད་');

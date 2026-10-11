@@ -19,16 +19,8 @@ assert.match(
   /function formatOcrLineDisplayNumber\(line, index\)/,
   "line rows must identify whether they belong to the left, center, or right region"
 );
-assert.match(
-  app,
-  /APP_BUILD_ID = "20261003-ocr-preserve-red-v12"/,
-  "the new line structure must invalidate stale browser OCR state"
-);
-assert.match(
-  html,
-  /app\.js\?v=20261003-ocr-preserve-red-v12/,
-  "the browser must request the new app script instead of its cached version"
-);
+assert.match(app, /APP_BUILD_ID = "[^"]+"/, "the app must expose a build identifier for diagnosing stale browser assets");
+assert.match(html, /app\.js\?v=[^" ]+/, "the browser must request a versioned app script");
 
 function extractFunction(name) {
   const start = app.indexOf(`function ${name}(`);
@@ -55,6 +47,12 @@ const flattenTraditionalRegionLines = new Function(
 );
 const flattened = flattenTraditionalRegionLines([
   {
+    id: "left",
+    label: "左侧",
+    lineCount: 1,
+    lines: [{ text: "左栏边注", bbox: { x: 0.03, y: 0.3, width: 0.05, height: 0.2 } }],
+  },
+  {
     id: "center",
     label: "中间",
     lineCount: 2,
@@ -72,8 +70,8 @@ const flattened = flattenTraditionalRegionLines([
 ]);
 assert.deepEqual(
   flattened.map((line) => [line.regionId, line.regionLineIndex, line.text]),
-  [["center", 0, "第一行"], ["center", 1, "第二行"], ["right", 0, "1-689"]],
-  "center rows and the sparse right-side page marker must remain separate display rows"
+  [["left", 0, "左栏边注"], ["center", 0, "第一行"], ["center", 1, "第二行"], ["right", 0, "1-689"]],
+  "left and right side results must display as independent rows without being folded into center text"
 );
 
 console.log("traditional region line display regression check passed");

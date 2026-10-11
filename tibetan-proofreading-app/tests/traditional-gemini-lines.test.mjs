@@ -3,6 +3,17 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
 const source = app.slice(app.indexOf('async function runTraditionalGeminiLines('), app.indexOf('function hasValidPageOcr('));
+const helperStart = app.indexOf('function joinActiveOcrLines(');
+const helperBrace = app.indexOf('{', helperStart);
+let helperDepth = 0, helperEnd = -1;
+for (let index = helperBrace; index < app.length; index += 1) {
+  if (app[index] === '{') helperDepth += 1;
+  if (app[index] === '}') helperDepth -= 1;
+  if (helperDepth === 0) { helperEnd = index + 1; break; }
+}
+assert.notEqual(helperStart, -1, 'the production OCR line joiner must exist');
+assert.notEqual(helperEnd, -1, 'the production OCR line joiner must have a complete body');
+const joinActiveOcrLines = app.slice(helperStart, helperEnd);
 const calls = [], saves = [], statuses = [];
 const lines = [0, 1, 2].map(index => ({text:'〔尚未识别〕',missing:true,index,regionId:'center',bbox:{x:.1,y:.1+index*.2,width:.8,height:.1},reviewImage:{source_bbox:{clip_top:.1+index*.2}}}));
 const state = {pageNum:1,cacheKey:'sample',ocrResults:new Map()};
@@ -20,7 +31,7 @@ const context = vm.createContext({state, Date,
   saveCachedResults:async options=>{assert.equal(options.immediateRemote,true);saves.push(state.ocrResults.get(1).text);},
   updateOcrPanelForPage:()=>{},updateSummary:()=>{},
 });
-vm.runInContext(source,context);
+vm.runInContext(`${joinActiveOcrLines}\n${source}`,context);
 await context.runTraditionalGeminiLines('http://localhost/ocr',{});
 assert.equal(calls.length,3);assert.equal(saves.length,3);
 assert.equal(state.ocrResults.get(1).raw.failed_line_count,1);

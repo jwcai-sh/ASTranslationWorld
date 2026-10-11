@@ -6,31 +6,23 @@ const testFile = fileURLToPath(import.meta.url);
 const appPath = new URL("../app.js", import.meta.url);
 const source = readFileSync(appPath, "utf8");
 
-const smartBranchStart = source.indexOf("const bdrcText = bdrcParsed.text.trim();");
-const aiRequestStart = source.indexOf("setStatus(\"BDRC 完成，正在调用 AI Vision 校正高危藏文字母...\", \"warn\");", smartBranchStart);
-const pendingPersistStart = source.indexOf("aiPending: true", smartBranchStart);
+const ocrFlowStart = source.indexOf("async function runOcrForCurrentPage(");
+const ocrFlowEnd = source.indexOf("async function runTraditionalGeminiLines(", ocrFlowStart);
+const ocrFlow = source.slice(ocrFlowStart, ocrFlowEnd);
+const persistResult = ocrFlow.indexOf("saveOcrResultFromParsed(");
+const reviewMissingLines = ocrFlow.indexOf("for (const [index, line] of lines.entries())");
 
-assert.notEqual(smartBranchStart, -1, "smart OCR branch must exist");
-assert.notEqual(aiRequestStart, -1, "smart OCR branch must call AI Vision after BDRC");
-assert.notEqual(pendingPersistStart, -1, "BDRC result must be persisted before the AI Vision request");
+assert.notEqual(ocrFlowStart, -1, "current-page OCR flow must exist");
+assert.notEqual(persistResult, -1, "OCR results must be persisted as soon as recognition completes");
+assert.notEqual(reviewMissingLines, -1, "BDRC OCR must review missing lines when coordinates are available");
 assert.ok(
-  pendingPersistStart < aiRequestStart,
-  "BDRC result must be cached and rendered before awaiting AI Vision"
+  persistResult < reviewMissingLines,
+  "the page result must be saved before awaiting any line-level AI review"
 );
 assert.match(
-  source,
-  /AI Vision 正在识别/,
-  "pending AI Vision state must be rendered instead of clearing both OCR panels"
-);
-assert.match(
-  source,
-  /bdrcError/,
-  "smart fallback must preserve a visible BDRC diagnostic row when BDRC is unavailable"
-);
-assert.match(
-  source,
-  /makeAiOnlyCompareWithBdrcDiagnostic/,
-  "old AI Vision-only cached results must render a BDRC unavailable diagnostic instead of an empty BDRC pane"
+  ocrFlow,
+  /isMissingOcrTranscription\(line\) && normalizeBbox\(line\.bbox\)[\s\S]*await reviewOcrLineWithAiVision/,
+  "only missing OCR lines with source coordinates should be sent for AI review"
 );
 assert.match(
   source,
@@ -75,4 +67,4 @@ assert.match(
   "Tibetan PDF text layers must reject mixed Latin-extended font-encoding mojibake by ratio, not only by absolute count"
 );
 
-console.log("smart OCR persistence regression check passed");
+console.log("current OCR persistence and missing-line review regression check passed");

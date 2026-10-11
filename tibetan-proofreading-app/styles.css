@@ -399,6 +399,14 @@ button {
   flex-wrap: wrap;
 }
 
+.ocr-toolbar-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  min-width: 0;
+  gap: 10px;
+}
+
 .ocr-profile-control {
   display: inline-flex;
   align-items: center;
@@ -675,6 +683,7 @@ button:disabled {
 .workspace.translation-workflow .ocr-pane,
 .workspace.translation-workflow .ai-ocr-pane,
 .workspace.translation-workflow .pane-resizer[data-resizer="viewer-ocr"],
+.workspace.translation-workflow .viewer-ocr-divider,
 .workspace.translation-workflow .pane-resizer[data-resizer="ocr-ai"],
 .workspace.translation-workflow .pane-resizer[data-resizer="ai-translation"] {
   display: none !important;
@@ -755,6 +764,20 @@ button:disabled {
   background: linear-gradient(180deg, rgba(35, 115, 77, 0.08), rgba(35, 115, 77, 0.2));
 }
 
+.viewer-ocr-divider {
+  position: relative;
+  z-index: 4;
+  width: 8px;
+  min-height: 0;
+}
+
+.viewer-ocr-divider > .pane-resizer {
+  position: absolute;
+  inset: 0;
+  width: 8px;
+  height: auto;
+}
+
 .pane-resizer::after {
   content: "";
   position: absolute;
@@ -783,8 +806,28 @@ body.is-resizing-panes * {
 }
 
 .pane-resizer-toggle {
+  position: absolute;
+  z-index: 6;
+  top: 50%;
+  left: 50%;
+  width: 30px;
+  min-width: 30px;
+  height: 34px;
+  padding: 0;
   display: grid;
   place-items: center;
+  transform: translate(-50%, -50%);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--green-deep);
+  background: #fff;
+  box-shadow: 0 3px 10px rgba(20, 45, 36, 0.12);
+  cursor: pointer;
+}
+
+.pane-resizer-toggle:hover {
+  border-color: var(--line-strong);
+  background: #f5faf7;
 }
 
 .translation-toggle {
@@ -1607,6 +1650,42 @@ body.is-resizing-panes * {
   box-shadow: 0 0 0 2px rgba(35, 115, 77, 0.12);
 }
 
+.proofread-block-card.is-deleted {
+  border-style: dashed;
+  background: #fafafa;
+}
+
+.proofread-deleted-block-notice {
+  min-height: 54px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #65736c;
+  background: #f7f9f8;
+  font-size: 13px;
+}
+
+.proofread-delete-block-button,
+.proofread-restore-block-button {
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid #e2b3ae;
+  border-radius: 7px;
+  color: #9d3027;
+  background: #fff7f6;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.proofread-restore-block-button {
+  flex: 0 0 auto;
+  border-color: #bfd5ca;
+  color: var(--green-deep);
+  background: #f4faf6;
+}
+
 .proofread-save-button {
   min-width: 72px;
   height: 30px;
@@ -1695,6 +1774,20 @@ body.is-resizing-panes * {
   border-radius: 0;
   color: #b42318;
   background: #fff5f3;
+}
+
+.proofread-floating-mark-action {
+  position: fixed;
+  z-index: 1200;
+  width: 68px;
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #e7a39b;
+  color: #a52d23;
+  background: #fff5f3;
+  box-shadow: 0 5px 16px rgba(36, 31, 28, 0.2);
 }
 
 .proofread-clear-shared-error-button {
@@ -1807,10 +1900,10 @@ body.is-resizing-panes * {
   min-height: var(--source-preview-min-height, 88px);
   padding: 8px 12px 10px;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: flex-start;
   overflow-x: auto;
-  overflow-y: hidden;
+  overflow-y: visible;
   border: 0;
   border-top: 1px solid #e5ece8;
   border-radius: 0;
@@ -1856,15 +1949,15 @@ body.is-resizing-panes * {
   display: none !important;
 }
 
-.proofread-model-section .proofread-inline-action-group { margin-left: auto; flex: 0 0 auto; }
+.proofread-model-section .proofread-inline-action-group { margin-left: 0; flex: 0 0 auto; }
 .proofread-model-section .proofread-clear-shared-error-button {
   width: auto;
-  min-width: 90px;
+  min-width: 58px;
   padding: 0 8px;
   border-left: 0;
   border-right: 1px solid #f7c8c1;
 }
-.proofread-model-toggle { flex: 0 0 auto; min-height: 30px; }
+.proofread-model-toggle { flex: 0 0 auto; min-height: 30px; margin-left: auto; }
 .proofread-model-section.is-qwen,
 .proofread-model-section.is-openai {
   width: 100%;
@@ -1982,6 +2075,10 @@ body.is-resizing-panes * {
   overflow: visible !important;
   visibility: visible !important;
   opacity: 1 !important;
+}
+
+.workspace.proofread-merged-view .proofread-block-card.is-duplicate-source {
+  display: none !important;
 }
 
 .proofread-result-editor {
@@ -2466,27 +2563,56 @@ body.is-resizing-panes * {
 .proofread-editor-label .review-in-heading { margin-left: 0; font-weight: 400; }
 .proofread-editor-label .review-in-heading .review-feedback:empty { display: none; }
 
-/* Hide the source pane completely in OCR, retaining its DOM and page state. */
-.workspace.ocr-only-mode.viewer-collapsed .viewer-pane,
-.workspace.ocr-only-mode.viewer-collapsed .pane-resizer[data-resizer="viewer-ocr"] {
+/* Hide the source pane while keeping its divider control available. */
+.workspace.ocr-only-mode.viewer-collapsed .viewer-pane {
+  display: none;
+}
+.workspace.ocr-only-mode.viewer-collapsed.proofread-merged-view {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+}
+.workspace.ocr-only-mode.viewer-collapsed.proofread-merged-view .viewer-ocr-divider {
+  position: absolute;
+  z-index: 5;
+  inset: 0 auto 0 24px;
+  width: 8px;
+  display: grid;
+}
+.workspace.ocr-only-mode.viewer-collapsed.proofread-merged-view .viewer-ocr-divider > .pane-resizer::after {
+  inset: 0 -4px;
+}
+.workspace.ocr-only-mode.viewer-collapsed.proofread-merged-view .viewer-ocr-divider > .viewer-ocr-divider-toggle {
+  top: 50%;
+  left: 0;
+  transform: translate(0, -50%);
+}
+.workspace.proofread-merged-view.ocr-only-mode .viewer-pane-header > .pane-collapse-button {
+  display: none;
+}
+.workspace:not(.proofread-merged-view) .viewer-ocr-divider-toggle {
   display: none;
 }
 .app-shell.ai-only-mode .workspace.ocr-only-mode.viewer-collapsed {
   grid-template-columns: minmax(0, 1fr);
 }
-.viewer-visibility-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+
+.app-shell.workbench-mode #workbenchView .resource-profile-control {
+  order: -1;
 }
 
-/* Reserve the source toggle independently of navigation's intrinsic width. */
+.app-shell.workbench-mode #workbenchView .font-size-controls {
+  display: none;
+}
+
+/* Keep the source-pane toggle in the header only in the translation workflow. */
 .viewer-pane-header {
-  position: relative;
   flex-wrap: wrap;
+}
+.workspace.translation-workflow .viewer-pane-header {
+  position: relative;
   padding-right: 66px;
 }
-.viewer-pane-header > .pane-collapse-button {
+.workspace.translation-workflow .viewer-pane-header > .pane-collapse-button {
   position: absolute;
   top: 14px;
   right: 16px;
@@ -2500,8 +2626,126 @@ body.is-resizing-panes * {
   flex-wrap: wrap;
   max-width: 100%;
 }
-.workspace.viewer-collapsed .viewer-pane-header > .pane-collapse-button {
+.workspace.translation-workflow.viewer-collapsed .viewer-pane-header > .pane-collapse-button {
   position: static;
 }
 
 .ocr-page-navigation { flex-wrap: wrap; justify-content: flex-start; }
+
+/* Give per-block proofreading more vertical room in the single-workflow view. */
+.app-shell.workbench-mode .topbar {
+  min-height: 48px;
+  padding-block: 6px;
+}
+
+.app-shell.workbench-mode #workbenchView {
+  padding-top: 8px;
+  padding-bottom: 10px;
+}
+
+.app-shell.workbench-mode #workbenchView .ocr-pane > .pane-header {
+  display: none;
+}
+
+.app-shell.workbench-mode #workbenchView .ocr-pane > .ocr-toolbar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  min-height: 0;
+  max-height: none;
+  padding: 5px 10px 4px;
+  gap: 4px;
+  overflow: visible;
+}
+
+.app-shell.workbench-mode #workbenchView .ocr-toolbar-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  min-width: 0;
+  min-height: 30px;
+  gap: 5px;
+}
+
+.app-shell.workbench-mode #workbenchView .ocr-toolbar-primary {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.app-shell.workbench-mode #workbenchView .ocr-toolbar-secondary {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.app-shell.workbench-mode #workbenchView .ocr-engine-control {
+  display: none;
+}
+
+.app-shell.workbench-mode #workbenchView .ocr-profile-control {
+  white-space: nowrap;
+}
+
+.app-shell.workbench-mode #workbenchView .ocr-page-navigation {
+  flex-wrap: nowrap;
+  gap: 2px;
+}
+
+.app-shell.workbench-mode #workbenchView .ocr-page-navigation .page-jump-button {
+  flex: 0 0 26px;
+  width: 26px;
+  min-width: 26px;
+  height: 28px;
+  padding: 3px;
+}
+
+.app-shell.workbench-mode #workbenchView .ocr-page-navigation .page-jump-button .lucide {
+  width: 14px;
+  height: 14px;
+}
+
+.app-shell.workbench-mode #workbenchView .ocr-page-navigation .viewer-page-input {
+  width: 54px;
+  min-width: 54px;
+  height: 28px;
+  padding-inline: 4px;
+}
+
+.app-shell.workbench-mode #workbenchView .ocr-page-navigation .viewer-page-total {
+  white-space: nowrap;
+  padding-inline: 3px;
+}
+
+.app-shell.workbench-mode #workbenchView #ocrProfileSelect {
+  max-width: min(190px, 28vw);
+}
+
+.app-shell.workbench-mode #workbenchView .ocr-toolbar-secondary > [data-collapse-pane="ocr"] {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.app-shell.workbench-mode #workbenchView #batchOcrProgress {
+  flex: 0 1 220px;
+  min-width: 48px;
+  max-width: 220px;
+  margin: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow-wrap: normal;
+}
+
+.app-shell.workbench-mode #workbenchView .ocr-pane > .result-summary {
+  min-height: 48px;
+  padding: 7px 12px;
+  gap: 6px;
+}
+
+.app-shell.workbench-mode #workbenchView .ocr-pane > .result-summary .summary-label {
+  font-size: 11px;
+}
+
+.app-shell.workbench-mode #workbenchView .ocr-pane > .result-summary strong {
+  margin-top: 1px;
+  font-size: 15px;
+}

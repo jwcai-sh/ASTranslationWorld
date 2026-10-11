@@ -31,9 +31,10 @@ except Exception:  # pragma: no cover - optional sparse page-number fallback
     pytesseract = None  # type: ignore[assignment]
 
 try:
-    from ai_vision_ocr_server import detect_text_line_bboxes, detect_traditional_column_bboxes
+    from ai_vision_ocr_server import detect_text_line_bboxes, detect_traditional_column_bboxes, detect_physical_text_line_bboxes
 except Exception:  # pragma: no cover - layout metadata remains optional
     detect_text_line_bboxes = None  # type: ignore[assignment]
+    detect_physical_text_line_bboxes = None
     detect_traditional_column_bboxes = None  # type: ignore[assignment]
 
 
@@ -77,6 +78,16 @@ def is_meaningful_ocr_line(text: str) -> bool:
         "\u0f20" <= character <= "\u0f29"
         or "\u0f40" <= character <= "\u0f6c"
         for character in value
+    )
+
+
+def score_ocr_candidate(lines: list[dict[str, Any]]) -> int:
+    """Prefer side-column orientations that return more readable Tibetan text."""
+    text = "".join(str(line.get("text") or "") for line in lines)
+    return sum(
+        1 for character in text
+        if "\u0f20" <= character <= "\u0f29"
+        or "\u0f40" <= character <= "\u0f6c"
     )
 
 
@@ -446,20 +457,20 @@ def run_traditional_center_line_ocr(
     line_mode: str,
 ) -> dict[str, Any] | None:
     """Detect and OCR each physical center-row before mapping it to the page."""
-    if detect_text_line_bboxes is None:
+    if detect_physical_text_line_bboxes is None:
         return None
     page_height, page_width = image.shape[:2]
     x0 = max(0, round(float(region["x"]) * page_width))
-    y0 = max(0, round(float(region["y"]) * page_height))
+    y0 = max(0, round((float(region["y"]) - float(region["height"]) * .15) * page_height))
     x1 = min(page_width, round((float(region["x"]) + float(region["width"])) * page_width))
-    y1 = min(page_height, round((float(region["y"]) + float(region["height"])) * page_height))
+    y1 = min(page_height, round((float(region["y"]) + float(region["height"]) * 1.15) * page_height))
     if x1 <= x0 or y1 <= y0:
         return None
     center_crop = image[y0:y1, x0:x1]
     encoded_ok, encoded = cv2.imencode(".png", center_crop)
     if not encoded_ok:
         return None
-    line_boxes = merge_nearby_line_bboxes(detect_text_line_bboxes(encoded.tobytes()))
+    line_boxes = detect_physical_text_line_bboxes(encoded.tobytes(), include_masks=True)
     if not 2 <= len(line_boxes) <= 12:
         return None
 
@@ -472,7 +483,11 @@ def run_traditional_center_line_ocr(
         line_y1 = min(crop_height, round((float(line_box["y"]) + float(line_box["height"])) * crop_height) + vertical_padding)
         line_x0 = min(max(0, horizontal_padding), max(0, crop_width - 1))
         line_x1 = max(line_x0 + 1, crop_width - horizontal_padding)
-        line_crop = center_crop[line_y0:line_y1, line_x0:line_x1]
+        line_crop = center_crop[line_y0:line_y1, line_x0:line_x1].copy()
+        exclusion = line_box.get('_exclusion')
+        if exclusion is not None:
+            paper = np.median(line_crop.reshape(-1, 3), axis=0).astype(np.uint8)
+            line_crop[exclusion[line_y0:line_y1, line_x0:line_x1] > 0] = paper
         physical_bbox = {
             "x": round((x0 + float(line_box["x"]) * crop_width) / page_width, 6),
             "y": round((y0 + line_y0) / page_height, 6),
@@ -570,8 +585,11 @@ def run_traditional_region_ocr(
         # height fallback is retained for pages whose line detector needs the
         # surrounding frame to establish a baseline.
         rotation_names = [""]
-        if region.get("direction") == "vertical":
+        vertical_region = region.get("direction") == "vertical"
+        if vertical_region:
             rotation_names.extend(["clockwise", "counterclockwise"])
+        best_score = -1
+        page_number_found = False
         for rotation_name in rotation_names:
           for pad_y in (max(3, round(height * 0.06)), height):
             x0 = max(0, round(region["x"] * width) - pad_x)
@@ -612,6 +630,7 @@ def run_traditional_region_ocr(
                         "model": "tesseract-page-number",
                         "ocr_rotation": f"tesseract-{rotation_name}",
                     }
+                    page_number_found = True
                     break
             ok, encoded = cv2.imencode(".png", crop)
             if not ok:
@@ -646,13 +665,17 @@ def run_traditional_region_ocr(
                     "model": result.get("model", ""),
                     "ocr_rotation": rotation_name or "none",
                 }
-                if best_result is None or candidate["line_count"] > best_result["line_count"]:
+                candidate_score = score_ocr_candidate(lines)
+                if candidate_score > best_score:
                     best_result = candidate
+                    best_score = candidate_score
                 if lines:
                     break
             except Exception as exc:
                 best_error = str(exc)
-          if best_result is not None and best_result["lines"]:
+          if page_number_found:
+              break
+          if best_result is not None and best_result["lines"] and not vertical_region:
               break
 
         if best_result is not None:

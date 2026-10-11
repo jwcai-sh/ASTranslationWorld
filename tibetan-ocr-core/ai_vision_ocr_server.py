@@ -183,7 +183,11 @@ def split_enlarged_line(enlarged, tile_width):
             if spaces.size:
                 right = start + int(spaces[-1])
         ranges.append([left, right])
-        left = right
+        if right == enlarged.width:
+            break
+        # Retain a narrow shared edge when whitespace detection fails. The
+        # transcription prompt instructs models to copy that overlap once.
+        left = max(left + 1, right - min(48, max(1, tile_width // 24)))
     tiles = []
     for left, right in ranges:
         output = BytesIO()
@@ -192,7 +196,7 @@ def split_enlarged_line(enlarged, tile_width):
     return tiles, ranges
 
 
-LINE_CROP_VERSION = 21
+LINE_CROP_VERSION = 24
 
 
 def find_row_frame_clips(image_bytes, center, row, page_width, page_height):
@@ -445,7 +449,9 @@ def prepare_line_review_images(
                     view = rgb_crop[ay-y0:by-y0, ax-x0:bx-x0]
                     view[mask[ay-oy:by-oy, ax-ox:bx-ox] > 0] = background
                 crop = Image.fromarray(rgb_crop)
-            crop = remove_crop_frame_rules(crop)
+            # Preserve source pixels: color-based rule removal also erases
+            # faded Tibetan strokes on yellow paper. Row masks above already
+            # isolate neighbouring lines without repainting this row.
             # A BDRC rubric band may include a long red rule and blank paper.
             # Locate saturated red glyph components before enlargement so a
             # short inscription is not split into a dozen mostly-empty tiles.
@@ -943,7 +949,10 @@ def detect_physical_text_line_bboxes(image_bytes, include_masks=False):
     height, width = image.shape[:2]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    mask = ((gray < 135) | ((hsv[:, :, 1] > 100) &
+    # Faded lower stacks still belong to a glyph. Use paper-relative pale
+    # ink for component extents and seams, but dark cores for row peaks.
+    pale_limit = min(210, float(np.median(gray)) - 30)
+    mask = ((gray < pale_limit) | ((hsv[:, :, 1] > 100) &
             ((hsv[:, :, 0] < 22) | (hsv[:, :, 0] > 165)))).astype(np.uint8)
     # Remove connected frame rules, including slanted rules. Do not erase a
     # whole scanline just because one long ink run occurs on it.
@@ -959,7 +968,8 @@ def detect_physical_text_line_bboxes(image_bytes, include_masks=False):
             components.append((label, int(x), int(y), int(w), int(h)))
     mask = accepted[labels]
     margin = max(1, round(width * .025))
-    density = mask[:, margin:width - margin].sum(axis=1).astype(np.float64)
+    core = mask & ((gray < 135) | (hsv[:, :, 1] > 100)).astype(np.uint8)
+    density = core[:, margin:width - margin].sum(axis=1).astype(np.float64)
     smooth = cv2.GaussianBlur(density.reshape(-1, 1), (1, 0),
                              sigmaX=0, sigmaY=max(2, height * .015)).ravel()
     if not smooth.size or smooth.max() < 3:
@@ -1682,6 +1692,51 @@ def validate_qwen_transcript(value: str) -> str:
     return text
 
 
+def prepare_qwen_review_context(image_bytes: bytes, bbox: dict[str, float]) -> tuple[list[bytes], dict[str, Any]]:
+    """Provide page position and unmasked neighbouring pixels for one row."""
+    if Image is None:
+        raise RuntimeError("Pillow is required for Qwen review context")
+    from PIL import ImageDraw
+
+    with Image.open(BytesIO(image_bytes)) as original:
+        page = original.convert("RGB")
+    width, height = page.size
+    x0 = max(0, round(float(bbox["x"]) * width))
+    y0 = max(0, round(float(bbox["y"]) * height))
+    x1 = min(width, round((float(bbox["x"]) + float(bbox["width"])) * width))
+    y1 = min(height, round((float(bbox["y"]) + float(bbox["height"])) * height))
+    if x1 <= x0 or y1 <= y0:
+        raise RuntimeError("千问复核原文定位为空，请重新生成裁剪预览。")
+
+    overview = page.copy()
+    # A side marker identifies the row without drawing through faint letters.
+    center_y = (y0 + y1) // 2
+    ImageDraw.Draw(overview).polygon(((max(0, x0 - 12), center_y),
+                                     (max(0, x0 - 36), max(0, center_y - 18)),
+                                     (max(0, x0 - 36), min(height - 1, center_y + 18))),
+                                    fill=(0, 95, 225))
+    overview.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
+
+    row_height = y1 - y0
+    margin_x = max(12, round(width * .012))
+    margin_y = max(24, row_height)
+    local_bbox = (max(0, x0 - margin_x), max(0, y0 - margin_y),
+                  min(width, x1 + margin_x), min(height, y1 + margin_y))
+    local = page.crop(local_bbox)
+    local.thumbnail((1800, 1800), Image.Resampling.LANCZOS)
+    images = []
+    for picture in (overview, local):
+        output = BytesIO()
+        picture.save(output, format="PNG", optimize=True)
+        images.append(output.getvalue())
+    return images, {"page_size": {"width": width, "height": height},
+                    "overview_size": {"width": overview.width, "height": overview.height},
+                    "local_bbox": {"x": local_bbox[0], "y": local_bbox[1],
+                                   "width": local_bbox[2] - local_bbox[0],
+                                   "height": local_bbox[3] - local_bbox[1]},
+                    "local_size": {"width": local.width, "height": local.height}}
+
+
 def call_qwen_line_review(image_bytes: bytes, filename: str, bbox: dict[str, float], model: str) -> dict[str, Any]:
     if model not in QWEN_REVIEW_MODELS:
         raise RuntimeError("千问复核模型不在允许列表中，请刷新模型列表。")
@@ -1694,8 +1749,15 @@ def call_qwen_line_review(image_bytes: bytes, filename: str, bbox: dict[str, flo
     if upstream.scheme != "https" or not (host.endswith(".aliyuncs.com") or host.endswith(".qianwenai.com")) or upstream.username or upstream.password or upstream.query or upstream.fragment:
         raise RuntimeError("千问接口必须是官方 HTTPS 地址，且不能在地址中包含凭据。")
     tiles, metadata = prepare_line_review_images(image_bytes, bbox)
-    prompt = "图片按从左到右构成同一行藏文。独立逐字转录红字、叠字与标点；忽略边框及邻行，不按语义补写。无法确认的字标记〔?〕。只输出这一行的原文，不解释、不翻译。"
+    source_bbox = metadata.get("source_bbox") or bbox
+    context_images, context_metadata = prepare_qwen_review_context(image_bytes, source_bbox)
+    prompt = ("第1张是整页定位图，蓝色侧箭头指向目标行，只用于确定行序；第2张由原图直接截取且未遮罩，包含上下邻行，只用于核对目标行的上下加字。"
+              "此后各图是目标行从左到右的放大分片，相邻分片边缘有少量重叠，重叠文字只转录一次。"
+              "只逐字转录目标行的红字、叠字与标点；不要转录邻行、边框或页码，不按语义补写。"
+              "无法确认的字标记〔?〕。只输出这一行的原文，不解释、不翻译。")
     content = [{"type": "text", "text": prompt}]
+    content.extend({"type": "image_url", "image_url": {"url": image_data_url(picture, "context.png")}, "max_pixels": 8388608}
+                   for picture in context_images)
     content.extend({"type": "image_url", "image_url": {"url": image_data_url(tile, "line.png")}, "max_pixels": 8388608} for tile in tiles)
     url = QWEN_REVIEW_BASE_URL if QWEN_REVIEW_BASE_URL.endswith("/chat/completions") else QWEN_REVIEW_BASE_URL + "/chat/completions"
     body = {"model": model, "messages": [{"role": "user", "content": content}], "temperature": 0, "max_tokens": MAX_TOKENS}
@@ -1707,7 +1769,8 @@ def call_qwen_line_review(image_bytes: bytes, filename: str, bbox: dict[str, flo
     if not text or not choices or choices[0].get("finish_reason") not in {None, "stop"}:
         raise RuntimeError("千问未返回完整的单行文字，请检查模型权限或重试。")
     text = validate_qwen_transcript(text)
-    return {"text": text, "lines": [{"text": text, "bbox": bbox}], "model": raw.get("model", model), "provider": "qwen", "line_review": True, "review_image": metadata}
+    return {"text": text, "lines": [{"text": text, "bbox": bbox}], "model": raw.get("model", model), "provider": "qwen", "line_review": True,
+            "review_image": metadata, "review_context": context_metadata}
 
 
 def review_models_payload() -> dict[str, Any]:

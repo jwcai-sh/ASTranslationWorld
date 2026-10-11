@@ -45,3 +45,34 @@ for (const side of ['bdrc', 'llm']) {
     assert.deepEqual(JSON.parse(storage.get('test-project')).ocrResults['1'].compare.sharedErrors, []);
   });
 }
+
+test('BDRC mark is included in saved OCR quality stats and clearing it updates the saved count', () => {
+  const {ctx, storage} = setup('bdrc');
+  vm.runInContext('state.ocrQualityReviews = []; markSelectedSharedError(0, {})', ctx);
+
+  let payload = JSON.parse(storage.get('test-project'));
+  assert.equal(payload.ocrQualityReviews.length, 1);
+  assert.equal(payload.ocrQualityReviews[0].provider, 'bdrc');
+  assert.equal(payload.ocrQualityReviews[0].reviewedChars, 3);
+  assert.equal(payload.ocrQualityReviews[0].errorChars, 1);
+
+  vm.runInContext('getSelectedProofreadRange = () => null; clearSharedErrorMark(0, {}, "bdrc")', ctx);
+  payload = JSON.parse(storage.get('test-project'));
+  assert.equal(payload.ocrQualityReviews.length, 1);
+  assert.equal(payload.ocrQualityReviews[0].errorChars, 0);
+});
+
+test('saving the BDRC block choice persists its quality record', () => {
+  const {ctx, storage} = setup('bdrc');
+  vm.runInContext(`
+    els.ocrText = {value:''};
+    updateThumbnailState = () => {};
+    saveProofreadBlockChoice(0, 'bdrc', null);
+  `, ctx);
+
+  const payload = JSON.parse(storage.get('test-project'));
+  assert.equal(payload.ocrResults['1'].text, 'བོད་');
+  assert.equal(payload.ocrQualityReviews.length, 1);
+  assert.equal(payload.ocrQualityReviews[0].provider, 'bdrc');
+  assert.equal(payload.ocrQualityReviews[0].reviewedChars, 3);
+});

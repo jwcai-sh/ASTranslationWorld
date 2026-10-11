@@ -8,6 +8,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import ai_vision_ocr_server as server
+import bdrc_ocr_server as bdrc_server
 
 
 class TraditionalLineTests(unittest.TestCase):
@@ -55,7 +56,8 @@ class TraditionalLineTests(unittest.TestCase):
         tiles, ranges = server.split_enlarged_line(image, 1500)
         self.assertLess(ranges[0][1], 1470)
         self.assertEqual(ranges[-1][1], image.width)
-        self.assertEqual(ranges[0][1], ranges[1][0])
+        self.assertGreater(ranges[0][1], ranges[1][0])
+        self.assertLessEqual(ranges[0][1] - ranges[1][0], 48)
         self.assertEqual(len(tiles), 2)
 
     def test_legacy_crops_exclude_neighbours_and_preserve_detached_marks(self):
@@ -127,6 +129,79 @@ class TraditionalLineTests(unittest.TestCase):
         self.assertEqual([region['id'] for region in regions], ['left', 'center', 'right'])
         self.assertGreater(regions[1]['x'], .12)
         self.assertLess(regions[1]['x'] + regions[1]['width'], .88)
+
+    def test_vertical_side_region_uses_best_rotated_reading_not_first_single_glyph(self):
+        image = bdrc_server.np.full((600, 1000, 3), 245, dtype=bdrc_server.np.uint8)
+        # An asymmetric red mark lets the fake recognizer distinguish the two
+        # rotations while keeping the actual page crop and rotation code real.
+        bdrc_server.cv2.rectangle(image, (50, 36), (64, 48), (0, 0, 220), -1)
+        ok, encoded = bdrc_server.cv2.imencode('.png', image)
+        self.assertTrue(ok)
+        regions = [
+            {'id': 'left', 'label': '左侧', 'role': 'side', 'direction': 'vertical',
+             'x': .04, 'y': .1, 'width': .1, 'height': .8},
+            {'id': 'center', 'label': '中间', 'role': 'body', 'direction': 'horizontal',
+             'x': .2, 'y': .1, 'width': .6, 'height': .8},
+            {'id': 'right', 'label': '右侧', 'role': 'side', 'direction': 'vertical',
+             'x': .86, 'y': .1, 'width': .1, 'height': .8},
+        ]
+        rotated_mark_sides = []
+
+        def recognize(content, *_args):
+            crop = bdrc_server.cv2.imdecode(bdrc_server.np.frombuffer(content, dtype=bdrc_server.np.uint8), bdrc_server.cv2.IMREAD_COLOR)
+            _red_y, red_x = bdrc_server.np.where((crop[:, :, 2] > 150) & (crop[:, :, 2] > crop[:, :, 1] * 1.5))
+            if crop.shape[1] < crop.shape[0]:
+                return {'text': '།', 'lines': [{'text': '།'}], 'model': 'test'}
+            if len(red_x):
+                side = 'right' if float(red_x.mean()) > crop.shape[1] / 2 else 'left'
+                rotated_mark_sides.append(side)
+                text = 'ཀ' if side == 'right' else 'བོད་ཡིག'
+                return {'text': text, 'lines': [{'text': text}], 'model': 'test'}
+            return {'text': 'དབུས', 'lines': [{'text': 'དབུས'}], 'model': 'test'}
+
+        with patch.object(bdrc_server, 'detect_traditional_column_bboxes', return_value=regions), \
+             patch.object(bdrc_server, 'run_traditional_center_line_ocr', return_value=None), \
+             patch.object(bdrc_server, 'run_ocr', side_effect=recognize):
+            result = bdrc_server.run_traditional_region_ocr(encoded.tobytes(), 'traditional', 'Woodblock-Stacks', 'line', {})
+
+        left = result['regions'][0]
+        self.assertEqual(rotated_mark_sides, ['right', 'left'])
+        self.assertEqual(left['text'], 'བོད་ཡིག')
+        self.assertEqual(left['ocr_rotation'], 'counterclockwise')
+
+    def test_center_line_recognition_never_receives_side_column_pixels(self):
+        image = bdrc_server.np.full((600, 1000, 3), 245, dtype=bdrc_server.np.uint8)
+        image[:, :180] = (0, 0, 220)
+        image[:, 820:] = (220, 0, 0)
+        detector_widths = []
+        recognizer_crops = []
+
+        def detect(content, include_masks=False):
+            crop = bdrc_server.cv2.imdecode(bdrc_server.np.frombuffer(content, dtype=bdrc_server.np.uint8), bdrc_server.cv2.IMREAD_COLOR)
+            detector_widths.append(crop.shape[1])
+            return [
+                {'x': .05, 'y': .1, 'width': .9, 'height': .2},
+                {'x': .05, 'y': .6, 'width': .9, 'height': .2},
+            ]
+
+        def recognize(content, *_args):
+            crop = bdrc_server.cv2.imdecode(bdrc_server.np.frombuffer(content, dtype=bdrc_server.np.uint8), bdrc_server.cv2.IMREAD_COLOR)
+            recognizer_crops.append(crop)
+            return {'text': 'དབུས', 'lines': [{'text': 'དབུས'}], 'model': 'test'}
+
+        _, encoded = bdrc_server.cv2.imencode('.png', image)
+        region = {'id': 'center', 'label': '中间', 'role': 'body', 'direction': 'horizontal',
+                  'x': .2, 'y': .1, 'width': .6, 'height': .8}
+        with patch.object(bdrc_server, 'detect_physical_text_line_bboxes', side_effect=detect), \
+             patch.object(bdrc_server, 'run_ocr', side_effect=recognize):
+            result = bdrc_server.run_traditional_center_line_ocr(image, region, 'line')
+
+        self.assertEqual(result['line_count'], 2)
+        self.assertEqual(detector_widths, [600])
+        self.assertEqual(len(recognizer_crops), 2)
+        for crop in recognizer_crops:
+            self.assertFalse(bdrc_server.np.any((crop[:, :, 2] > 150) & (crop[:, :, 2] > crop[:, :, 1] * 1.5)))
+            self.assertFalse(bdrc_server.np.any((crop[:, :, 0] > 150) & (crop[:, :, 0] > crop[:, :, 1] * 1.5)))
 
     def test_bad_frame_does_not_fall_back_to_whole_page(self):
         with patch.object(server, 'detect_traditional_column_bboxes', return_value=[]), \

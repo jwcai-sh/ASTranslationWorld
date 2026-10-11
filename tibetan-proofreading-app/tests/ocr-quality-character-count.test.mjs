@@ -43,3 +43,40 @@ test('changing one stacked glyph counts as one manual edit', () => {
   const edited = vm.runInContext(`updateManualEditTracking({}, 'ཀྱེམ', 'ཀྱིམ')`, context);
   assert.equal(edited.manualErrorChars, 1);
 });
+
+test('manual edit ranges use UTF-16 offsets and cover the complete Tibetan cluster', () => {
+  const range = vm.runInContext("getChangedTextRange('ཀྱིམ', 'གྱིམ')", context);
+  assert.deepEqual({ start: range.start, end: range.end }, { start: 0, end: 3 });
+});
+
+test('manual edit ranges stay aligned after an earlier multi-codepoint Tibetan cluster', () => {
+  const range = vm.runInContext("getChangedTextRange('ཀྱིམགྱི', 'ཀྱིམངྱི')", context);
+  assert.deepEqual({ start: range.start, end: range.end }, { start: 4, end: 7 });
+});
+
+test('legacy cached manual ranges expand to the full Tibetan cluster when rendered', () => {
+  const ranges = vm.runInContext(`getManualEditRanges({
+    text:'གྱིམ', manuallyEdited:true, manualEditRanges:[{start:0,end:1}]
+  })`, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(ranges)), [{ start: 0, end: 3 }]);
+});
+
+test('Gemini error highlight paints the whole Tibetan letter when selection hits only its combining mark', () => {
+  const markedText = vm.runInContext(`(() => {
+    document.createTextNode = (value) => ({ textContent: value, className: '' });
+    document.createElement = () => ({ textContent: '', className: '', title: '' });
+    const container = { textContent: '', nodes: [], appendChild(node) { this.nodes.push(node); } };
+    renderOcrLineMarkup(container, 'ཀྱིམ', { sharedErrorRanges: [{ start: 1, end: 2 }] });
+    return container.nodes.filter((node) => node.className.includes('ocr-shared-error-inline'))
+      .map((node) => node.textContent).join('');
+  })()`, context);
+  assert.equal(markedText, 'ཀྱི');
+});
+
+test('manual edit ranges are recalculated from the saved baseline when cached offsets are stale', () => {
+  const ranges = vm.runInContext(`getManualEditRanges({
+    text:'གྱིམ', manualBaselineText:'ཀྱིམ', manuallyEdited:true,
+    manualEditRanges:[{start:3,end:4}]
+  })`, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(ranges)), [{ start: 0, end: 3 }]);
+});
