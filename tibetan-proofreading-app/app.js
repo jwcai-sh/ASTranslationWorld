@@ -2403,7 +2403,7 @@ function restoreCachedResults() {
 }
 
 function saveCachedResults(options = {}) {
-  if (!state.cacheKey || !state.pageCount) return;
+  if (!state.cacheKey || !state.pageCount) return false;
 
   try {
     const payload = {
@@ -2421,9 +2421,10 @@ function saveCachedResults(options = {}) {
     window.localStorage.setItem(state.cacheKey, JSON.stringify(payload));
     const remoteSave = scheduleRemoteStateSave(payload, options.immediateRemote);
     renderHomeDashboard();
-    return remoteSave;
+    return remoteSave ?? true;
   } catch (error) {
     console.warn("Failed to save cached OCR state", error);
+    return false;
   }
 }
 
@@ -5227,6 +5228,15 @@ function isPeripheralProofreadRegion(line) {
   return regionKeys.some((region) => ["left", "左侧", "左", "right", "右侧", "右"].includes(region));
 }
 
+function showProofreadAutoSaveStatus(index, saved) {
+  const card = Array.from(els.ocrLineCompare?.querySelectorAll?.(".proofread-block-card") || [])
+    .find((item) => Number(item.dataset.proofreadBlock) === index);
+  const status = card?.querySelector(".proofread-autosave-status");
+  if (!status) return;
+  status.textContent = saved ? "已自动保存" : "保存失败，请重试";
+  status.classList.toggle("is-error", !saved);
+}
+
 function renderProofreadBlockCard({ index, bdrcLine, aiLine, finalLine, sourceLine, compare }) {
   const card = document.createElement("section");
   card.className = "proofread-block-card";
@@ -5261,30 +5271,28 @@ function renderProofreadBlockCard({ index, bdrcLine, aiLine, finalLine, sourceLi
 
   const savedSide = getProofreadDefaultChoice(finalLine, bdrcLine, aiLine);
 
-  const saveButton = document.createElement("button");
-  saveButton.className = "secondary-button proofread-save-button";
-  saveButton.type = "button";
-  saveButton.innerHTML = '<i data-lucide="save"></i>保存';
-  saveButton.addEventListener("click", () => {
-    const selected =
-      card.querySelector(".proofread-choice-select")?.value ||
-      card.querySelector("input[type='radio']:checked")?.value ||
-      getProofreadDefaultChoice(finalLine, bdrcLine, aiLine);
-    saveProofreadBlockChoice(index, selected, card);
-  });
-
   const options = document.createElement("div");
   options.className = "proofread-options proofread-block-actions";
-  options.append(
-    saveButton,
-    renderDeleteProofreadBlockButton(index),
-  );
   const choiceSelect = renderProofreadChoiceSelect(
     index,
     savedSide,
     aiLine.provider === "qwen" ? "千问候选" : aiLine.provider === "openai" ? "OpenAI 候选" : "Gemini Vision",
     compare,
   );
+  const autoSaveStatus = document.createElement("span");
+  autoSaveStatus.className = "proofread-autosave-status";
+  autoSaveStatus.setAttribute("role", "status");
+  autoSaveStatus.setAttribute("aria-live", "polite");
+  autoSaveStatus.textContent = "修改与标错自动保存";
+  choiceSelect.querySelector("select").addEventListener("change", (event) => {
+    const previous = getProofreadDefaultChoice(
+      state.ocrResults.get(state.pageNum)?.lines?.[index],
+      bdrcLine,
+      aiLine,
+    );
+    if (!saveProofreadBlockChoice(index, event.target.value, card)) event.target.value = previous;
+  });
+  options.append(choiceSelect, autoSaveStatus, renderDeleteProofreadBlockButton(index));
 
   const stack = document.createElement("div");
   stack.className = "proofread-editor-stack";
@@ -5330,7 +5338,6 @@ function renderProofreadBlockCard({ index, bdrcLine, aiLine, finalLine, sourceLi
   });
 
   const sourcePanel = renderProofreadSourcePanel(sourceLine, index);
-  options.append(choiceSelect);
   card.append(sourcePanel, stack, options);
   if (state.isOcrBusy && state.ocrResults.get(state.pageNum)?.raw?.line_ocr) {
     card.querySelectorAll("button:not(.source-preview-scale-button), select").forEach((control) => { control.disabled = true; });
@@ -5758,13 +5765,15 @@ function updateIndependentReviewText(provider, index, value) {
   const key = provider === "qwen" ? "qwenReviews" : "openaiReviews";
   const candidate = result?.compare?.[key]?.find((review) => review.index === index);
   if (!candidate) return false;
+  const wasAdopted = result.lines?.[index]?.adoptedProvider === provider;
   const nextText = normalizeOcrTextSpacing(String(value || ""));
   const baseline = String(candidate.manualBaselineText ?? candidate.text ?? "");
   candidate.text = nextText;
   updateManualEditTracking(candidate, nextText, baseline);
   candidate.updatedAt = new Date().toISOString();
   result.updatedAt = candidate.updatedAt;
-  saveCachedResults();
+  if (syncAdoptedProofreadText(result, index, provider, candidate, wasAdopted)) updateProofreadSummaryAfterEdit();
+  showProofreadAutoSaveStatus(index, saveCachedResults() !== false);
   return true;
 }
 
@@ -5884,8 +5893,9 @@ function updateIndependentReviewErrors(provider, index, expectedText, range) {
     candidate.errorRanges = [...(candidate.errorRanges || []), {start, end}];
   } else candidate.errorRanges = [];
   result.updatedAt = new Date().toISOString();
-  saveCachedResults();
-  return true;
+  const saved = saveCachedResults() !== false;
+  showProofreadAutoSaveStatus(index, saved);
+  return saved ? true : "save-failed";
 }
 
 function refreshProofreadErrorMarkDisplay(index, provider = "") {
@@ -6492,7 +6502,7 @@ function renderProofreadEditorGroup({ index, side, label, line, peerLine, compar
     updateQuality();
   });
   editor.addEventListener("blur", () => {
-    syncEditorValue(userEdited);
+    if (userEdited) syncEditorValue(true);
     renderEditorMarkup();
     resizeLineEditor(editor);
     userEdited = false;
@@ -6503,7 +6513,7 @@ function renderProofreadEditorGroup({ index, side, label, line, peerLine, compar
 }
 
 function getProofreadDefaultChoice(finalLine, bdrcLine, aiLine) {
-  if (["qwen", "openai"].includes(finalLine?.adoptedProvider)) return finalLine.adoptedProvider;
+  if (["bdrc", "llm", "qwen", "openai"].includes(finalLine?.adoptedProvider)) return finalLine.adoptedProvider;
   const finalText = normalizeCompareText(finalLine?.text || "");
   const bdrcText = normalizeCompareText(bdrcLine?.text || "");
   const aiText = isDiagnosticOcrLine(aiLine) ? "" : normalizeCompareText(aiLine?.text || "");
@@ -6511,6 +6521,26 @@ function getProofreadDefaultChoice(finalLine, bdrcLine, aiLine) {
   if (bdrcText && finalText === bdrcText) return "bdrc";
   if (aiText) return "llm";
   return "bdrc";
+}
+
+function syncAdoptedProofreadText(result, index, provider, line, wasAdopted) {
+  if (!wasAdopted || !result.lines?.[index]) return false;
+  result.lines[index] = {
+    ...result.lines[index],
+    text: line.text || "",
+    adoptedProvider: provider,
+    manualBaselineText: line.manualBaselineText,
+    manuallyEdited: Boolean(line.manuallyEdited),
+    manualErrorChars: Math.max(0, Number(line.manualErrorChars || 0)),
+    manualEditRanges: getManualEditRanges(line),
+  };
+  result.text = joinActiveOcrLines(result.lines);
+  if (els.ocrText) els.ocrText.value = result.text;
+  return true;
+}
+
+function updateProofreadSummaryAfterEdit() {
+  if (els.ocrText && els.charCount && els.recognizedCount) updateSummary();
 }
 
 function ensureProofreadCompareResult() {
@@ -6547,6 +6577,9 @@ function ensureProofreadLine(lines, index, fallbackLine = null) {
 function updateProofreadCompareLine(side, index, value, line, peerLine) {
   const { result, compare } = ensureProofreadCompareResult();
   const sideKey = side === "bdrc" ? "bdrc" : "llm";
+  const wasAdopted = getProofreadDefaultChoice(
+    result.lines?.[index], compare.bdrc.lines[index], compare.llm.lines[index],
+  ) === sideKey;
   const normalizedValue = normalizeOcrTextSpacing(value || "");
   const targetLine = ensureProofreadLine(compare[sideKey].lines, index, getSourceLineForRow(line, peerLine));
   const previousText = String(targetLine.text || "");
@@ -6565,8 +6598,14 @@ function updateProofreadCompareLine(side, index, value, line, peerLine) {
   }
   result.compare = compare;
   result.updatedAt = new Date().toISOString();
+  if (syncAdoptedProofreadText(result, index, sideKey, targetLine, wasAdopted)) updateProofreadSummaryAfterEdit();
+  saveOcrQualityReview({
+    result, compare, pageNum: state.pageNum, blockIndex: index,
+    text: targetLine.text, qualitySide: sideKey,
+    manualErrorChars: targetLine.manualErrorChars || 0,
+  });
   state.ocrResults.set(state.pageNum, result);
-  saveCachedResults();
+  showProofreadAutoSaveStatus(index, saveCachedResults() !== false);
   updateAiOcrPanelMeta(compare);
   return targetLine;
 }
@@ -6579,9 +6618,12 @@ function markSelectedSharedError(index, card, expectedProvider = "") {
   }
 
   if (selection.reviewProvider) {
-    if (updateIndependentReviewErrors(selection.reviewProvider, index, selection.sourceText, selection)) {
+    const saved = updateIndependentReviewErrors(selection.reviewProvider, index, selection.sourceText, selection);
+    if (saved) {
       refreshProofreadErrorMarkDisplay(index, selection.reviewProvider);
-      setStatus(`第 ${index + 1} 个 block 的独立候选已标错并保存。`, "ok");
+      setStatus(saved === true
+        ? `第 ${index + 1} 个 block 的独立候选已标错并保存。`
+        : `第 ${index + 1} 个 block 标错后未能保存，请重试。`, saved === true ? "ok" : "error");
     }
     return;
   }
@@ -6617,20 +6659,17 @@ function markSelectedSharedError(index, card, expectedProvider = "") {
   result.compare = compare;
   result.updatedAt = new Date().toISOString();
   state.ocrResults.set(state.pageNum, result);
-  if (sideKey === "bdrc") {
-    saveOcrQualityReview({
-      result,
-      compare,
-      pageNum: state.pageNum,
-      blockIndex: index,
-      text: sourceText,
-      qualitySide: sideKey,
-      manualErrorChars: selectedLine.manualErrorChars || 0,
-    });
-  }
-  saveCachedResults();
+  saveOcrQualityReview({
+    result, compare, pageNum: state.pageNum, blockIndex: index,
+    text: sourceText, qualitySide: sideKey,
+    manualErrorChars: selectedLine.manualErrorChars || 0,
+  });
+  const saved = saveCachedResults() !== false;
+  showProofreadAutoSaveStatus(index, saved);
   refreshProofreadErrorMarkDisplay(index);
-  setStatus(`第 ${index + 1} 个 block 已在 ${sourceLabel} 结果中标记“错误”。`, "ok");
+  setStatus(saved
+    ? `第 ${index + 1} 个 block 已在 ${sourceLabel} 结果中标记“错误”。`
+    : `第 ${index + 1} 个 block 标错后未能保存，请重试。`, saved ? "ok" : "error");
 }
 
 function clearSharedErrorMark(index, card, expectedProvider = "") {
@@ -6657,9 +6696,12 @@ function clearSharedErrorMark(index, card, expectedProvider = "") {
       setStatus(`当前${proofreadModelName(expectedProvider)}结果没有命中的“错误”标记。`, "warn");
       return;
     }
-    saveCachedResults();
+    const saved = saveCachedResults() !== false;
+    showProofreadAutoSaveStatus(index, saved);
     refreshProofreadErrorMarkDisplay(index, expectedProvider);
-    setStatus(`已清除${proofreadModelName(expectedProvider)}结果中的“错误”标记。`, "ok");
+    setStatus(saved
+      ? `已清除${proofreadModelName(expectedProvider)}结果中的“错误”标记。`
+      : `撤销标错后未能保存，请重试。`, saved ? "ok" : "error");
     return;
   }
   if (candidateSelection?.reviewProvider && candidateSelection.index === index) {
@@ -6668,9 +6710,10 @@ function clearSharedErrorMark(index, card, expectedProvider = "") {
     const candidate = result?.compare?.[key]?.find((review) => review.index === index);
     if (candidate && candidate.text === candidateSelection.sourceText) {
       candidate.errorRanges = (candidate.errorRanges || []).filter((range) => !rangesOverlap(range.start, range.end, candidateSelection.start, candidateSelection.end));
-      saveCachedResults();
+      const saved = saveCachedResults() !== false;
+      showProofreadAutoSaveStatus(index, saved);
       refreshProofreadErrorMarkDisplay(index, candidateSelection.reviewProvider);
-      setStatus("已清除候选选区中的错误标记。", "ok");
+      setStatus(saved ? "已清除候选选区中的错误标记。" : "撤销标错后未能保存，请重试。", saved ? "ok" : "error");
     }
     return;
   }
@@ -6721,21 +6764,25 @@ function clearSharedErrorMark(index, card, expectedProvider = "") {
   result.compare = compare;
   result.updatedAt = new Date().toISOString();
   state.ocrResults.set(state.pageNum, result);
-  if (expectedProvider === "bdrc") {
-    const line = getEffectiveOcrSideLines(compare.bdrc)[index];
+  const qualitySide = expectedProvider || selection?.side;
+  if (qualitySide === "bdrc" || qualitySide === "llm") {
+    const line = getEffectiveOcrSideLines(compare[qualitySide])[index];
     saveOcrQualityReview({
       result,
       compare,
       pageNum: state.pageNum,
       blockIndex: index,
       text: line?.text || "",
-      qualitySide: "bdrc",
+      qualitySide,
       manualErrorChars: line?.manualErrorChars || 0,
     });
   }
-  saveCachedResults();
+  const saved = saveCachedResults() !== false;
+  showProofreadAutoSaveStatus(index, saved);
   refreshProofreadErrorMarkDisplay(index);
-  setStatus(`已清除第 ${index + 1} 个 block 的“错误”标记。`, "ok");
+  setStatus(saved
+    ? `已清除第 ${index + 1} 个 block 的“错误”标记。`
+    : `第 ${index + 1} 个 block 撤销标错后未能保存，请重试。`, saved ? "ok" : "error");
 }
 
 async function reviewOcrLineWithAiVision(index, card, sourceLine, bdrcLine, aiLine) {
@@ -6770,7 +6817,7 @@ function saveProofreadBlockChoice(index, side, card) {
     ? compare[`${candidateProvider}Reviews`]?.find((review) => review.index === index) : null;
   if (candidateProvider && !candidate) {
     setStatus(`当前 block 没有可采用的${selectedProviderLabel}候选。`, "warn");
-    return;
+    return false;
   }
   // Adoption changes only the final transcription, never another model's record.
   const sideKey = side === "bdrc" ? "bdrc" : "llm";
@@ -6778,7 +6825,7 @@ function saveProofreadBlockChoice(index, side, card) {
   const selectedLine = candidate || ensureProofreadLine(compare[sideKey].lines, index, compare[peerKey].lines[index]);
   if (sideKey === "llm" && isDiagnosticOcrLine(selectedLine)) {
     setStatus("Gemini Vision 当前没有可保存的识别文本；请重新识别，或先手动编辑该 Gemini Vision block。", "warn");
-    return;
+    return false;
   }
   const peerLine = compare[peerKey].lines[index] || null;
   const sourceLine = getSourceLineForRow(selectedLine, peerLine) || result.lines?.[index] || null;
@@ -6804,20 +6851,23 @@ function saveProofreadBlockChoice(index, side, card) {
   result.lines = finalLines;
   result.text = joinActiveOcrLines(finalLines);
   result.compare = compare;
-  saveOcrQualityReview({
-    result,
-    compare,
-    pageNum: state.pageNum,
-    blockIndex: index,
-    text: selectedLine.text || "",
-    qualitySide: sideKey,
-    manualErrorChars: selectedLine.manualErrorChars || 0,
-  });
+  if (!candidateProvider) {
+    saveOcrQualityReview({
+      result,
+      compare,
+      pageNum: state.pageNum,
+      blockIndex: index,
+      text: selectedLine.text || "",
+      qualitySide: sideKey,
+      manualErrorChars: selectedLine.manualErrorChars || 0,
+    });
+  }
   result.source = "proofread";
   result.updatedAt = new Date().toISOString();
   state.ocrResults.set(state.pageNum, result);
   els.ocrText.value = result.text;
-  saveCachedResults();
+  const saved = saveCachedResults() !== false;
+  showProofreadAutoSaveStatus(index, saved);
   updateSummary();
   updateThumbnailState();
   if (card) {
@@ -6829,13 +6879,11 @@ function saveProofreadBlockChoice(index, side, card) {
     if (choiceSelect) {
       choiceSelect.value = candidateProvider || sideKey;
     }
-    const saveButton = card.querySelector(".proofread-save-button");
-    if (saveButton) {
-      saveButton.classList.add("is-saved");
-      window.setTimeout(() => saveButton.classList.remove("is-saved"), 1600);
-    }
   }
-  setStatus(`第 ${index + 1} 个 block 已保存为 ${selectedProviderLabel} 版本。`, "ok");
+  setStatus(saved
+    ? `第 ${index + 1} 个 block 已自动采用并保存为 ${selectedProviderLabel} 版本。`
+    : `第 ${index + 1} 个 block 采用 ${selectedProviderLabel} 后未能保存，请重试。`, saved ? "ok" : "error");
+  return saved;
 }
 
 function getCurrentOcrCompareOrEmpty() {
@@ -7980,7 +8028,7 @@ function buildOcrModelQualityMarkdown(reviews) {
   return [
     "## 模型质检统计",
     "",
-    "仅统计人工标错后并点击“保存”的 Gemini Vision block；估算准确率 = 1 - 标错字符数 / 已审核字符数。样本量较小时仅供参考。",
+    "仅统计人工标错或修改后自动保存的 BDRC 与 Gemini Vision block；估算准确率 = 1 - 标错字符数 / 已审核字符数。样本量较小时仅供参考。",
     "",
     "| 模型 | 服务 | 已审核 block | 已审核字符 | 标错字符 | 估算准确率 |",
     "| --- | --- | ---: | ---: | ---: | ---: |",
