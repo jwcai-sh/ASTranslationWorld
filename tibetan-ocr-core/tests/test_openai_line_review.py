@@ -15,7 +15,7 @@ def test_missing_config_never_calls_upstream():
         request.assert_not_called()
 
 def test_openai_routes_independently_and_returns_candidate():
-    with patch.object(server, 'OPENAI_REVIEW_API_KEY', 'test'), patch.object(server, 'OPENAI_REVIEW_MODEL', 'test-model'), patch.object(server, 'prepare_line_review_images', return_value=([b'png'], {})), patch.object(server, 'post_json', return_value={'status':'completed','model':'test-model','output':[{'type':'message','content':[{'type':'output_text','text':'བོད་'}]}]}) as request:
+    with patch.object(server, 'OPENAI_REVIEW_API_KEY', 'test'), patch.object(server, 'OPENAI_REVIEW_MODEL', 'test-model'), patch.object(server, 'prepare_line_review_images') as crop, patch.object(server, 'post_json', return_value={'status':'completed','model':'test-model','output':[{'type':'message','content':[{'type':'output_text','text':'བོད་'}]}]}) as request:
         result = server.call_openai_line_review(b'', 'test.png', {})
         assert result['text'] == 'བོད་'
         assert result['provider'] == 'openai'
@@ -23,6 +23,8 @@ def test_openai_routes_independently_and_returns_candidate():
         assert url == 'https://api.openai.com/v1/responses'
         assert body['store'] is False
         assert body['input'][0]['content'][1]['detail'] == 'high'
+        assert body['input'][0]['content'][1]['image_url'].endswith(',') is False
+        crop.assert_not_called()
 
 if __name__ == '__main__':
     test_missing_config_never_calls_upstream()

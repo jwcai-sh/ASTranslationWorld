@@ -12,7 +12,7 @@ import bdrc_ocr_server as bdrc_server
 
 
 class TraditionalLineTests(unittest.TestCase):
-    def test_main_ocr_uses_independent_row_images_and_continues_after_failure(self):
+    def test_traditional_ocr_keeps_preview_rows_but_recognizes_original_page_once(self):
         output = BytesIO()
         Image.new('RGB', (1200, 400), 'white').save(output, format='PNG')
         image = output.getvalue()
@@ -20,33 +20,20 @@ class TraditionalLineTests(unittest.TestCase):
                   'x': .1, 'y': .1, 'width': .8, 'height': .8}
         boxes = [{'x': .1, 'y': .1, 'width': .8, 'height': .1},
                  {'x': .1, 'y': .5, 'width': .8, 'height': .1}]
-        requests = []
-
-        def recognize(images, prompt, **kwargs):
-            requests.append(images)
-            assert '草稿' not in prompt
-            for content, _ in images:
-                with Image.open(BytesIO(content)) as crop:
-                    self.assertGreaterEqual(crop.height, 160)
-                    self.assertLessEqual(crop.height, 640)
-                    self.assertLessEqual(crop.width, 1500)
-            if len(requests) == 1:
-                raise RuntimeError('sample failure')
-            return {'text': 'བོད།', 'model': server.MODEL}
-
+        def recognize(content, filename, rows, model):
+            self.assertEqual(content, image)
+            self.assertEqual([row['index'] for row in rows], [0, 1])
+            return {'lines': [{'index': 0, 'text': 'གཅིག་'}, {'index': 1, 'text': 'གཉིས་'}],
+                    'model': 'gemini:gemini-2.5-flash'}
         with patch.object(server, 'detect_physical_text_line_bboxes', return_value=boxes), \
-             patch.object(server, 'USE_MODEL_AGGREGATOR', True), \
-             patch.object(server, 'call_model_aggregator_images', side_effect=recognize):
+             patch.object(server, 'call_gemini_page_review', side_effect=recognize) as request, \
+             patch.object(server, 'call_line_review_vision') as cropped:
             result = server.call_traditional_region_ocr(image, 'sample.png', '', [region])
-        self.assertEqual(len(requests), 2)
-        self.assertTrue(result['lines'][0]['error'])
-        self.assertEqual(result['lines'][1]['text'], 'བོད།')
-        metadata = result['lines'][1]['review_image']
-        self.assertEqual(metadata['source_size']['width'], 1200)
-        self.assertGreater(metadata['crop_pixels']['y'], 80, 'the second crop must exclude the first row')
-        bbox = result['lines'][1]['bbox']
-        self.assertEqual(bbox['x'], metadata['crop_pixels']['x'] / 1200)
-        self.assertEqual(bbox['height'], metadata['crop_pixels']['height'] / 400)
+        request.assert_called_once()
+        cropped.assert_not_called()
+        self.assertEqual([line['text'] for line in result['lines']], ['གཅིག་', 'གཉིས་'])
+        self.assertEqual(result['recognition_scope'], 'whole-page')
+        self.assertEqual(result['failed_line_count'], 0)
 
     def test_tiling_cuts_at_whitespace_instead_of_through_a_glyph(self):
         from PIL import ImageDraw

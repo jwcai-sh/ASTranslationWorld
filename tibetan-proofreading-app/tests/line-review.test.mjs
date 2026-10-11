@@ -6,7 +6,7 @@ const server = readFileSync(new URL("../../tibetan-ocr-core/ai_vision_ocr_server
 
 assert.match(app, /function getAiVisionLineReviewEndpoint\(\)/, "the app needs a dedicated AI Vision line-review endpoint");
 assert.match(app, /function reviewOcrLineWithAiVision\(index, card, sourceLine, bdrcLine, aiLine\)/, "each OCR row must be reviewable independently");
-assert.match(app, /Gemini Vision 复核/, "the OCR-row action must be visible to a proofreader");
+assert.match(app, /Gemini整页复核/, "the whole-page action must be visible to a proofreader");
 assert.match(app, /getCurrentPageImageBlob\(\)/, "line review must use the same high-resolution OCR page image");
 assert.match(app, /formData\.append\("bbox", JSON\.stringify\(bbox\)\)/, "line review must send the precise source bbox");
 const sourceRowsStart = app.indexOf("function renderOcrSourceRows(");
@@ -23,7 +23,7 @@ assert.match(
   "the active row view must attach the available model review actions to each eligible row"
 );
 assert.match(server, /"\/line-review"/, "the AI OCR server must expose a dedicated line-review route");
-assert.match(server, /def prepare_line_review_images\(/, "the server must tightly crop and enlarge the selected source line");
-assert.match(server, /单行藏文 OCR 复核/, "the review request must tell the model it is reading one line only");
+assert.match(server, /def prepare_line_review_images\(/, "previews may still tightly crop the selected source line");
+assert.match(server, /call_gemini_page_review/, "the review path must accept a complete page");
 
 console.log("line review regression check passed");

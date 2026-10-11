@@ -1283,7 +1283,20 @@ def detect_sparse_side_bbox(crop):
 def call_traditional_region_ocr(
     image_bytes: bytes, filename: str, prompt: str, regions: list[dict[str, float]], layout_only: bool = False
 ) -> dict[str, Any]:
-    """Locate physical rows first; only enlarged row images reach Gemini."""
+    """Locate display rows, then recognize center rows from the original page."""
+    if not layout_only:
+        layout = call_traditional_region_ocr(image_bytes, filename, prompt, regions, layout_only=True)
+        rows = [{"index": index, "bbox": line["bbox"]} for index, line in enumerate(layout["lines"])
+                if line.get("region_id") == "center"]
+        result = call_gemini_page_review(image_bytes, filename, rows, MODEL.removeprefix("gemini:"))
+        by_index = {line["index"]: line for line in result["lines"]}
+        lines = [{**line, "text": by_index[index]["text"], "missing": False}
+                 if index in by_index else {**line, "text": "", "missing": True}
+                 for index, line in enumerate(layout["lines"])]
+        return {**layout, "text": "\n".join(line["text"] for line in lines if line["text"]),
+                "lines": lines, "model": result["model"], "provider": "gemini",
+                "layout_only": False, "line_ocr": False, "failed_line_count": 0,
+                "recognition_scope": "whole-page"}
     blocks = []
     models = []
     for original_region in regions:
@@ -1627,14 +1640,86 @@ def call_openai_compatible(image_bytes: bytes, filename: str, prompt: str) -> di
     return call_openai_compatible_images([(image_bytes, filename)], prompt)
 
 
+def normalize_center_page_rows(rows: list) -> list[dict[str, Any]]:
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 200:
+        raise RuntimeError("整页复核需要中间栏行坐标。")
+    normalized = []
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict) or type(row.get("index")) is not int or row["index"] < 0 or row["index"] in seen:
+            raise RuntimeError("整页复核行号无效或重复。")
+        if row.get("region_id") not in (None, "center"):
+            raise RuntimeError("整页复核只接受中间栏行。")
+        seen.add(row["index"])
+        normalized.append({"index": row["index"], "bbox": parse_normalized_bbox(json.dumps(row.get("bbox")))})
+    return normalized
+
+
+def center_page_prompt(rows: list[dict[str, Any]]) -> str:
+    return ("图像是完整原页。只识别以下坐标对应的中间栏文字行，忽略左右边栏、边框及页码。"
+            "逐字保留红字、叠字、祥云符号与标点，不按语义补写。坐标归一化到0到1："
+            + json.dumps(rows, ensure_ascii=False) +
+            '。每个index仅返回一次，不重新编号。只输出JSON：{"lines":[{"index":0,"text":"原文"}]}。'
+            "不可省略行，无法确认的字以〔?〕标记。")
+
+
+def parse_center_page_response(text: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    try:
+        clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
+        returned = json.loads(clean)["lines"]
+        expected = {row["index"] for row in rows}
+        indexed = {item["index"]: item["text"] for item in returned
+                   if isinstance(item, dict) and type(item.get("index")) is int and isinstance(item.get("text"), str)}
+        if len(returned) != len(rows) or len(indexed) != len(rows) or set(indexed) != expected:
+            raise ValueError("missing or duplicate row")
+        return [{**row, "text": validate_qwen_transcript(indexed[row["index"]])} for row in rows]
+    except (ValueError, TypeError, KeyError, AttributeError, RuntimeError) as exc:
+        raise RuntimeError("整页识别结果行号不完整或内容无效，原结果保留，请重试。") from exc
+
+
+def call_gemini_page_review(image_bytes: bytes, filename: str, rows: list, model: str = "") -> dict[str, Any]:
+    if not USE_MODEL_AGGREGATOR:
+        raise RuntimeError("Gemini 整页识别需要本地模型聚合服务。")
+    model = model.removeprefix("gemini:") if model else MODEL.removeprefix("gemini:")
+    if model not in GEMINI_REVIEW_MODELS:
+        raise RuntimeError("Gemini 复核模型不在允许列表中。")
+    targets = normalize_center_page_rows(rows)
+    result = call_model_aggregator_images([(image_bytes, filename)], center_page_prompt(targets),
+                                          preserve_size=True, model_override=f"gemini:{model}")
+    lines = parse_center_page_response(str(result.get("text") or ""), targets)
+    return {"text": "\n".join(line["text"] for line in lines), "lines": lines,
+            "model": result.get("model", f"gemini:{model}"), "provider": "gemini",
+            "recognition_scope": "whole-page"}
+
+
+def call_openai_page_review(image_bytes: bytes, filename: str, rows: list) -> dict[str, Any]:
+    if not OPENAI_REVIEW_API_KEY or not OPENAI_REVIEW_MODEL:
+        raise RuntimeError("OpenAI 复核未配置：请在本地后端设置 OPENAI_REVIEW_API_KEY 和 OPENAI_REVIEW_MODEL。")
+    targets = normalize_center_page_rows(rows)
+    content = [{"type": "input_text", "text": center_page_prompt(targets)},
+               {"type": "input_image", "image_url": image_data_url(image_bytes, filename), "detail": "high"}]
+    raw = post_json("https://api.openai.com/v1/responses", {
+        "model": OPENAI_REVIEW_MODEL, "store": False, "max_output_tokens": MAX_TOKENS,
+        "input": [{"role": "user", "content": content}],
+    }, OPENAI_REVIEW_API_KEY)
+    text = "".join(part.get("text", "") for item in raw.get("output", [])
+                   if item.get("type") == "message" for part in item.get("content", [])
+                   if part.get("type") == "output_text").strip()
+    if not text or raw.get("status") == "incomplete":
+        raise RuntimeError("OpenAI 未返回完整的整页转录，请重试。")
+    lines = parse_center_page_response(text, targets)
+    return {"text": "\n".join(line["text"] for line in lines), "lines": lines,
+            "provider": "openai", "model": raw.get("model", OPENAI_REVIEW_MODEL),
+            "recognition_scope": "whole-page"}
+
+
 def call_openai_line_review(image_bytes: bytes, filename: str, bbox: dict[str, float]) -> dict[str, Any]:
     """Use the official OpenAI API independently of the existing AI provider."""
     if not OPENAI_REVIEW_API_KEY or not OPENAI_REVIEW_MODEL:
         raise RuntimeError("OpenAI 复核未配置：请在本地后端设置 OPENAI_REVIEW_API_KEY（或 OPENAI_API_KEY）和 OPENAI_REVIEW_MODEL；Codex 套餐不能作为 API key。")
-    tiles, metadata = prepare_line_review_images(image_bytes, bbox)
-    prompt = "图片按从左到右构成同一行藏文。请独立逐字转录，包括红字、叠字和标点。忽略边框及邻行，不按语义补写。无法确认的字以〔?〕标记。只输出本行转录文本。"
+    prompt = "完整原页。只转录中间栏坐标 " + json.dumps(bbox) + " 对应的藏文行；忽略左右栏。只输出原文。"
     content = [{"type": "input_text", "text": prompt}]
-    content.extend({"type": "input_image", "image_url": image_data_url(tile, "line.png"), "detail": "high"} for tile in tiles)
+    content.append({"type": "input_image", "image_url": image_data_url(image_bytes, filename), "detail": "high"})
     raw = post_json("https://api.openai.com/v1/responses", {
         "model": OPENAI_REVIEW_MODEL,
         "store": False,
@@ -1644,30 +1729,22 @@ def call_openai_line_review(image_bytes: bytes, filename: str, bbox: dict[str, f
     text = "".join(part.get("text", "") for item in raw.get("output", []) if item.get("type") == "message" for part in item.get("content", []) if part.get("type") == "output_text").strip()
     if not text or raw.get("status") == "incomplete":
         raise RuntimeError("OpenAI 未返回完整的单行转录，请重试或检查模型配置。")
-    return {"text": text, "lines": [{"text": text, "bbox": bbox}], "provider": "openai", "model": raw.get("model", OPENAI_REVIEW_MODEL), "line_review": True, "review_image": metadata}
+    return {"text": text, "lines": [{"text": text, "bbox": bbox}], "provider": "openai", "model": raw.get("model", OPENAI_REVIEW_MODEL), "line_review": True, "recognition_scope": "whole-page"}
 
 
 def call_line_review_vision(
     image_bytes: bytes, filename: str, bbox: dict[str, float], draft_text: str = "", model: str = "", allow_page_numbers: bool = False, request_timeout: float | None = None
 ) -> dict[str, Any]:
-    """Review exactly one source row with enlarged, ordered image tiles."""
+    """Review one center row using the original complete page."""
     if model:
         model = model.removeprefix("gemini:")
         if model not in GEMINI_REVIEW_MODELS:
             raise RuntimeError("Gemini 复核模型不在允许列表中，请刷新模型列表。")
         if not USE_MODEL_AGGREGATOR:
             raise RuntimeError("Gemini Vision 复核需要本地 Gemini 聚合服务；不会转发到其他提供商。")
-    tiles, review_image = prepare_line_review_images(image_bytes, bbox)
-    stem = os.path.splitext(filename or "page.png")[0] or "page"
-    images = [(tile, f"{stem}-line-review-{index + 1}.png") for index, tile in enumerate(tiles)]
-    prompt = "\n\n".join([
-        "这是单行藏文 OCR 复核。图片按从左到右的视觉顺序排列；它们共同构成同一行文字。",
-        "这是侧栏文字块，按原图实际方向读取边注和页码，保留可见数字；不要识别边框或区域外内容。" if allow_page_numbers else "只转录图片中可见的这一行藏文。保留朱色文字；不要识别边框、邻行、页码或区域外内容。",
-        "只输出一行转录文字，可以包含页码数字，不要解释或 Markdown。" if allow_page_numbers else "必须只输出一行纯藏文文本，不要解释、编号、Markdown 或‘无法辨认’。",
-        "本行目标是红色小字，只转录红色文字，忽略上方可能残留的黑色笔画。" if review_image.get("ink_color") == "red" else "",
-        "如果个别字无法确认，保留可见部分，不要按语义补写。",
-        f"现有 OCR 草稿（仅供比对，不可照抄）：{draft_text}" if draft_text else "",
-    ]).strip()
+    images = [(image_bytes, filename)]
+    prompt = ("图片是完整原页。只转录中间栏坐标 " + json.dumps(bbox) +
+              " 对应的一行藏文，忽略左右栏、邻行与边框；保留红字、叠字和标点。只输出原文。")
     if USE_MODEL_AGGREGATOR:
         result = call_model_aggregator_images(images, prompt, preserve_size=True, model_override=f"gemini:{model}" if model else "", **({"request_timeout": request_timeout} if request_timeout is not None else {}))
     else:
@@ -1678,7 +1755,7 @@ def call_line_review_vision(
         "text": text,
         "lines": [{"text": text, "bbox": bbox}] if text else [],
         "line_review": True,
-        "review_image": review_image,
+        "recognition_scope": "whole-page",
     }
 
 
@@ -1840,6 +1917,8 @@ def health_payload() -> dict[str, Any]:
             "ok": upstream_ok,
             "line_crop_version": LINE_CROP_VERSION,
             "qwen_recognition_scope": "whole-page",
+            "gemini_recognition_scope": "whole-page",
+            "openai_recognition_scope": "whole-page",
             "model": MODEL,
             "models": AGGREGATOR_MODELS or [MODEL],
             "allow_fallback": AGGREGATOR_ALLOW_FALLBACK,
@@ -1855,7 +1934,9 @@ def health_payload() -> dict[str, Any]:
     return {
         "ok": True,
         "line_crop_version": LINE_CROP_VERSION,
-            "qwen_recognition_scope": "whole-page",
+        "qwen_recognition_scope": "whole-page",
+        "gemini_recognition_scope": "whole-page",
+        "openai_recognition_scope": "whole-page",
         "model": MODEL,
         "base_url": BASE_URL,
         "upstream": chat_completions_url(),
@@ -1884,7 +1965,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.rstrip("/")
-        if path not in {"/ocr", "/layout", "/line-review", "/openai-line-review", "/qwen-line-review", "/qwen-page-review", "/line-preview", "/line-layout"}:
+        if path not in {"/ocr", "/layout", "/line-review", "/openai-line-review", "/openai-page-review", "/gemini-page-review", "/qwen-line-review", "/qwen-page-review", "/line-preview", "/line-layout"}:
             self.send_json({"error": "Not found"}, status=404)
             return
 
@@ -1981,7 +2062,17 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/openai-line-review":
-                payload = call_openai_line_review(image_bytes, filename, resolve_saved_review_bbox(image_bytes, parse_normalized_bbox(field_value(form, "bbox")), json.loads(field_value(form, "review_image") or "{}")))
+                payload = call_openai_line_review(image_bytes, filename, parse_normalized_bbox(field_value(form, "bbox")))
+                self.send_json(payload)
+                return
+
+            if path == "/openai-page-review":
+                payload = call_openai_page_review(image_bytes, filename, json.loads(field_value(form, "rows") or "[]"))
+                self.send_json(payload)
+                return
+
+            if path == "/gemini-page-review":
+                payload = call_gemini_page_review(image_bytes, filename, json.loads(field_value(form, "rows") or "[]"), field_value(form, "model"))
                 self.send_json(payload)
                 return
 

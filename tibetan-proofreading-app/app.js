@@ -1,7 +1,7 @@
 const SAMPLE_PDF_URL = "../藏文/天文历算学-本科教材 藏文40301698_部分.pdf";
 const PDF_WORKER_URL = "./vendor/pdf.worker.min.js";
-const APP_BUILD_ID = "20261011-qwen-whole-page";
-let qwenPageReviewPending = false;
+const APP_BUILD_ID = "20261011-center-page-models";
+let pageReviewPending = false;
 const REVIEW_MODEL_DEFAULTS = { qwen: ["qwen3.8-max", "qwen3.7-plus"], gemini: ["gemini-2.5-flash", "gemini-3.1-flash-lite"] };
 const reviewCatalogRequests = new Map();
 const SOURCE_LAYOUT_VERSION = 4;
@@ -3179,17 +3179,6 @@ async function runOcrForCurrentPage(options = {}) {
       `第 ${state.pageNum} 页 ${engineLabel} 识别完成。${parsed.raw?.failed_line_count ? ` ${parsed.raw.failed_line_count} 行失败或未返回文字，请逐行重新识别。` : ""}`,
       [], parsed.raw?.line_ocr ? "proofread" : "lines"
     );
-    if (mode !== "ai") {
-      const reviewPage = state.pageNum;
-      const reviewSourceKey = state.cacheKey;
-      const lines = state.ocrResults.get(state.pageNum)?.lines || [];
-      for (const [index, line] of lines.entries()) {
-        if (state.pageNum !== reviewPage || state.cacheKey !== reviewSourceKey) break;
-        if (isMissingOcrTranscription(line) && normalizeBbox(line.bbox)) {
-          await reviewOcrLineWithAiVision(index, null, line, line, null);
-        }
-      }
-    }
   } catch (error) {
     setStatus(
       `${engineLabel} OCR 调用失败：${formatNetworkError(error, endpoint, mode === "ai" ? "ai-ocr" : "bdrc-ocr")}`,
@@ -3203,65 +3192,61 @@ async function runOcrForCurrentPage(options = {}) {
   }
 }
 
-async function runTraditionalGeminiLines(endpoint, blob) {
+async function runTraditionalGeminiLines(endpoint, blob, selectedModel = "") {
   const pageNum = state.pageNum;
   const sourceKey = state.cacheKey;
-  const previous = getOcrSourceCompare(state.ocrResults.get(pageNum));
-  setStatus("正在定位三栏并生成单行裁剪预览…", "warn");
-  const layout = await callOcrEndpoint(endpoint.replace(/\/ocr\/?$/, "/line-layout"), blob);
-  const lines = getParsedOcrLines(layout);
-  if (!lines.length) throw new Error("未检测到可识别的文字行");
-  if (state.pageNum !== pageNum || state.cacheKey !== sourceKey) throw new Error("页面已切换，请返回原页重试。");
-  const oldLines = previous?.bdrc?.lines || [];
-  const aligned = oldLines.length === lines.length && oldLines.every((line, index) => {
-    const a = normalizeBbox(line.bbox), b = normalizeBbox(lines[index].bbox);
-    return a && b && line.regionId === lines[index].regionId && a.y <= b.y + b.height && b.y <= a.y + a.height;
-  });
-  if (previous) layout.raw.previous_compare = previous;
-  layout.compare = {
-    ...(aligned ? previous : {}),
-    bdrc: aligned ? { ...previous.bdrc, lines: oldLines.map((line, index) => ({
-      ...line, bbox: lines[index].bbox, bboxApproximate: false, regionLineCount: 1,
-    })) } : { label: "BDRC", text: "", lines: [] },
-    llm: { label: "Gemini Vision", text: getParsedOcrText(layout), lines, provider: "gemini" },
-  };
-  saveOcrResultFromParsed(layout, "ai-vision", "裁剪预览已生成，正在逐行识别…", [], "proofread");
-  const result = state.ocrResults.get(pageNum);
-  for (let index = 0; index < lines.length; index += 1) {
-    if (state.pageNum !== pageNum || state.cacheKey !== sourceKey) throw new Error("页面已切换，已完成的行已保存。");
-    const line = lines[index];
-    setStatus(`正在识别第 ${index + 1} / ${lines.length} 个文字行…`, "warn");
-    try {
-      const parsed = await callAiVisionLineReviewEndpoint(
-        endpoint.replace(/\/ocr\/?$/, "/line-review"), blob, line.bbox, "", "", line.reviewImage, line.regionId, true,
-      );
-      if (state.pageNum !== pageNum || state.cacheKey !== sourceKey) throw new Error("页面已切换");
-      const text = getParsedOcrText(parsed);
-      if (!text) throw new Error("模型未返回文字");
-      Object.assign(line, { text, error: false, missing: false, reviewImage: parsed.raw?.review_image || line.reviewImage,
-        model: getOcrResponseModel(parsed.raw), provider: "gemini" });
-      try { await saveModelInputCrop(line, index, line.reviewImage, makeLineCropContext(), "gemini", line.model, blob); }
-      catch (error) { console.warn("Model input crop cache failed", error.message); }
-    } catch (error) {
-      if (state.pageNum !== pageNum || state.cacheKey !== sourceKey) throw error;
-      const savedLine = result.compare.llm.lines[index];
-      if (savedLine?.text && !savedLine.error && !savedLine.missing) Object.assign(line, savedLine);
-      else Object.assign(line, { text: "〔本行识别失败，待重新识别〕", error: true, missing: true });
-      line.recognitionError = formatNetworkError(error, endpoint, "ai-ocr");
-    }
-    result.lines[index] = { ...line };
-    result.compare.llm.lines[index] = { ...line };
-    result.compare.llm.text = joinActiveOcrLines(result.compare.llm.lines);
-    result.text = joinActiveOcrLines(result.lines);
-    result.raw.failed_line_count = result.lines.filter((item) => item.error || item.missing).length;
-    result.updatedAt = new Date().toISOString();
-    state.ocrResults.set(pageNum, result);
-    await saveCachedResults({ immediateRemote: true });
-    updateOcrPanelForPage();
-    updateSummary();
+  const original = state.ocrResults.get(pageNum);
+  const before = JSON.stringify(original);
+  const previous = getOcrSourceCompare(original);
+  let baseLines = previous?.bdrc?.lines?.length ? getEffectiveOcrSideLines(previous.bdrc) : [];
+  let rows = baseLines.length ? collectCenterPageReviewRows(original) : null;
+  if (!rows?.length) {
+    setStatus("正在定位中间栏文字行…", "warn");
+    const layout = await callOcrEndpoint(endpoint.replace(/\/ocr\/?$/, "/line-layout"), blob);
+    baseLines = getParsedOcrLines(layout);
+    rows = baseLines.map((line, index) => {
+      if (isPeripheralProofreadRegion(line)) return null;
+      const bbox = normalizeBbox(line.bbox);
+      if (!bbox) throw new Error("中间栏文字行定位失败，原结果保留。");
+      return {index, bbox, region_id: "center"};
+    }).filter(Boolean);
   }
-  const failed = result.raw.failed_line_count;
-  setStatus(`第 ${pageNum} 页逐行识别完成：${lines.length - failed} 行成功，${failed} 行失败。`, failed ? "warn" : "ok");
+  if (!rows.length) throw new Error("未检测到中间栏文字行，原结果保留。");
+  if (state.pageNum !== pageNum || state.cacheKey !== sourceKey) throw new Error("页面已切换，请返回原页重试。");
+  setStatus(`Gemini Vision 正在读取整页原图并识别中间栏 ${rows.length} 行…`, "warn");
+  const payload = await requestWholePageReview(endpoint.replace(/\/ocr\/?$/, "/gemini-page-review"), blob, rows, selectedModel);
+  const reviewed = mergePageReviews([], payload, rows, "gemini");
+  if (state.pageNum !== pageNum || state.cacheKey !== sourceKey || state.ocrResults.get(pageNum) !== original || JSON.stringify(original) !== before) {
+    throw new Error("页面或校对结果已改变，未覆盖原结果。");
+  }
+  const byIndex = new Map(reviewed.map(line => [line.index, line]));
+  if (original) {
+    const compare = getOcrSourceCompare(original) || makeEmptyOcrCompare(original);
+    compare.llm.lines = baseLines.map((line, index) => {
+      const candidate = byIndex.get(index);
+      if (!candidate) return compare.llm.lines[index] || {...line, text: "", missing: true};
+      return {...line, ...candidate, missing: false, error: false, diagnostic: false};
+    });
+    compare.llm.text = joinActiveOcrLines(compare.llm.lines);
+    compare.llm.model = payload.model;
+    compare.llm.provider = "gemini";
+    compare.llm.returnedLineCount = reviewed.length;
+    original.compare = compare;
+    original.updatedAt = new Date().toISOString();
+  } else {
+    const lines = baseLines.map((line, index) => byIndex.has(index)
+      ? {...line, ...byIndex.get(index), missing: false, error: false}
+      : {...line, text: "", missing: true});
+    const text = joinActiveOcrLines(lines);
+    state.ocrResults.set(pageNum, {text, lines, raw: payload, source: "ai-vision",
+      ocrProfile: "traditional", updatedAt: new Date().toISOString(),
+      compare: normalizeOcrCompare({bdrc: {label:"BDRC", text:"", lines:[]},
+        llm: {label:"Gemini Vision", text, lines, model:payload.model, provider:"gemini"}})});
+  }
+  await saveCachedResults({immediateRemote: true});
+  if (state.pageNum === pageNum) updateOcrPanelForPage();
+  updateSummary();
+  setStatus(`第 ${pageNum} 页 Gemini Vision 整页识别已保存（中间栏 ${reviewed.length} 行）。`, "ok");
 }
 
 function hasValidPageOcr(result) {
@@ -5538,13 +5523,13 @@ function renderAiVisionLineReviewButton(index, card, sourceLine, bdrcLine, aiLin
   const button = document.createElement("button");
   button.className = "ghost-button compact proofread-ai-review-button";
   button.type = "button";
-  button.innerHTML = '<i data-lucide="scan-search"></i><span>重新识别</span>';
-  button.title = "将这一行原文紧密裁剪、放大后交给 Gemini Vision 重新识别；不会重新识别整页";
-  button.setAttribute("aria-label", `第 ${index + 1} 行 Gemini Vision 重新识别`);
-  const canReview = Boolean(normalizeBbox(sourceLine?.bbox) && !sourceLine?.estimated);
+  button.innerHTML = '<i data-lucide="scan-search"></i><span>Gemini整页复核</span>';
+  button.title = "使用完整原图复核本页中间栏全部文字行；裁剪预览供人工对照。";
+  button.setAttribute("aria-label", "Gemini整页复核，更新本页中间栏结果");
+  const canReview = Boolean(state.pageCount);
   button.disabled = !canReview;
   if (!canReview) {
-    button.title = "这一行没有可靠的原图定位坐标，暂时不能单行复核。";
+    button.title = "请先加载一页图像。";
   }
   button.addEventListener("mousedown", (event) => event.preventDefault());
   button.addEventListener("click", (event) => {
@@ -5581,9 +5566,9 @@ function renderIndependentLineReview(provider, index, sourceLine, bdrcLine, aiLi
   const button = document.createElement("button");
   button.type = "button";
   button.className = "ghost-button compact";
-  button.textContent = provider === "qwen" ? "千问整页复核" : `${label} 复核`;
-  button.setAttribute("aria-label", provider === "qwen" ? "千问整页复核，更新本页千问结果" : `第 ${index + 1} 行 ${label} 复核`);
-  button.title = provider === "qwen" ? "使用完整原图，一次复核并更新本页各行千问结果；裁剪预览仅供人工对照。" : `裁剪放大这一行，通过 ${label} API 独立复核；费用以服务商账号为准。`;
+  button.textContent = `${label}整页复核`;
+  button.setAttribute("aria-label", `${label}整页复核，更新本页${label}结果`);
+  button.title = `使用完整原图，一次复核并更新本页中间栏各行${label}结果；裁剪预览仅供人工对照。`;
   button.disabled = !normalizeBbox(sourceLine?.bbox) || Boolean(sourceLine?.estimated);
   const feedback = document.createElement("div");
   feedback.className = "openai-review-feedback";
@@ -5652,88 +5637,76 @@ function renderIndependentLineReview(provider, index, sourceLine, bdrcLine, aiLi
       feedback.textContent = "请先停止批量识别，再复核单个 block。";
       return;
     }
-    if (provider === "qwen") {
-      await reviewQwenWholePage(button, select, feedback);
-      return;
-    }
-    const pageNum = state.pageNum;
-    const sourceKey = state.cacheKey;
-    const original = state.ocrResults.get(pageNum);
-    const endpoint = getAiVisionLineReviewEndpoint().replace(/\/line-review$/, `/${provider}-line-review`);
-    const selectedModel = select?.value || "";
-    button.disabled = true;
-    if (select) select.disabled = true;
-    feedback.textContent = `${label} 复核中…`;
-    try {
-      if (select?.dataset.reviewConfigured === "false") {
-        const catalogEndpoint = endpoint.replace(/\/qwen-line-review$/, "/review-models");
-        const response = await fetch(catalogEndpoint, { cache: "no-store" });
-        if (!response.ok) throw new Error(`千问配置状态检查失败：HTTP ${response.status}`);
-        const catalog = await response.json();
-        select.dataset.reviewConfigured = String(Boolean(catalog.qwen?.configured));
-        if (!catalog.qwen?.configured) throw new Error("当前 AI OCR 服务未读取到千问 API key 或接口地址，请检查服务状态与本地配置。");
-      }
-      const blob = await getCurrentPageImageBlob();
-      if (state.pageNum !== pageNum || state.cacheKey !== sourceKey) throw new Error("页面已切换，请返回原页面重试。");
-      const cropContext = makeLineCropContext();
-      const cropEntry = await getCachedLineCrop(sourceLine, index, aiLine?.reviewImage || sourceLine.reviewImage, cropContext, blob);
-      const parsed = await callAiVisionLineReviewEndpoint(endpoint, blob, sourceLine.bbox, "", selectedModel, cropEntry.payload.review_image, sourceLine.regionId || "");
-      const text = validateIndependentReviewText(getParsedOcrText(parsed));
-      const result = state.ocrResults.get(pageNum);
-      if (state.cacheKey !== sourceKey || result !== original) throw new Error("原文或结果已更换，请重新复核。");
-      const compare = getOcrSourceCompare(result) || makeEmptyOcrCompare(result);
-      const reviews = compare[reviewKey] || [];
-      compare[reviewKey] = [...reviews.filter((review) => review.index !== index), {
-        index, text, bbox: sourceLine.bbox, model: getOcrResponseModel(parsed.raw) || selectedModel, provider, reviewedAt: new Date().toISOString(),
-        reviewImage: parsed.raw?.review_image || null,
-        reviewContext: parsed.raw?.review_context || null,
-      }];
-      result.compare = compare;
-      try { await saveModelInputCrop(sourceLine, index, parsed.raw?.review_image, cropContext, provider, getOcrResponseModel(parsed.raw), blob, parsed.raw?.review_context); }
-      catch (error) { feedback.textContent = `识别成功，但模型输入图片缓存失败：${error.message}`; }
-      saveCachedResults();
-      if (state.pageNum === pageNum) updateOcrPanelForPage();
-    } catch (error) {
-      feedback.textContent = `${label} 复核失败：${error.message || error}`;
-    } finally {
-      if (button.isConnected) button.disabled = false;
-      if (select?.isConnected) select.disabled = false;
-    }
+    await reviewProviderWholePage(provider, button, select, feedback);
+    return;
+
   });
   return group;
 }
 
-function mergeQwenPageReviews(previous, payload, rows) {
+function collectCenterPageReviewRows(result) {
+  const compare = getOcrSourceCompare(result) || makeEmptyOcrCompare(result);
+  const base = getEffectiveOcrSideLines(compare.bdrc);
+  const ai = getEffectiveOcrSideLines(compare.llm, base);
+  const final = result?.lines || [];
+  const rows = Array.from({length: Math.max(base.length, ai.length, final.length)}, (_, index) => {
+    const line = getSourceLineForRow(base[index], ai[index]) || final[index];
+    if (base[index]?.deleted || final[index]?.deleted || isPeripheralProofreadRegion(line)) return null;
+    const bbox = normalizeBbox(line?.bbox);
+    if (!bbox || line?.estimated) throw new Error("本页部分行缺少准确坐标，请先完成BDRC整页识别。");
+    return {index, bbox, region_id: "center"};
+  }).filter(Boolean);
+  if (!rows.length) throw new Error("本页没有可复核的中间栏文字行。");
+  return rows;
+}
+
+function mergePageReviews(previous, payload, rows, provider) {
   const incoming = payload?.lines;
   const expected = new Set(rows.map(row => row.index));
   if (payload?.recognition_scope !== "whole-page" || !Array.isArray(incoming)
       || incoming.length !== rows.length || new Set(incoming.map(row => row.index)).size !== rows.length
       || incoming.some(row => !Number.isInteger(row.index) || !expected.has(row.index))) {
-    throw new Error("千问整页结果行号不完整，原结果保留。");
+    throw new Error("整页结果行号不完整，原结果保留。");
   }
   const updated = incoming.map(row => ({index: row.index,
     text: validateIndependentReviewText(row.text),
     bbox: rows.find(target => target.index === row.index).bbox,
-    provider: "qwen", model: payload.model, recognitionScope: "whole-page",
+    provider, model: payload.model, recognitionScope: "whole-page",
     reviewedAt: new Date().toISOString()}));
   return [...previous.filter(row => !expected.has(row.index)), ...updated];
 }
 
-async function reviewQwenWholePage(button, select, feedback) {
-  if (qwenPageReviewPending) {
-    feedback.textContent = "千问正在复核整页，请等待完成。";
+function mergeQwenPageReviews(previous, payload, rows) {
+  return mergePageReviews(previous, payload, rows, "qwen");
+}
+
+async function requestWholePageReview(endpoint, blob, rows, model = "") {
+  const form = new FormData();
+  form.append("file", blob, makePageImageName());
+  form.append("rows", JSON.stringify(rows));
+  if (model) form.append("model", model);
+  const response = await fetch(endpoint, {method: "POST", body: form});
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return payload;
+}
+
+async function reviewProviderWholePage(provider, button, select, feedback) {
+  const label = provider === "qwen" ? "千问" : "OpenAI";
+  if (pageReviewPending) {
+    feedback.textContent = "本页正在复核，请等待完成。";
     return;
   }
   const pageNum = state.pageNum;
   const sourceKey = state.cacheKey;
   const original = state.ocrResults.get(pageNum);
   const before = JSON.stringify(original);
-  qwenPageReviewPending = true;
+  pageReviewPending = true;
   button.disabled = true;
   if (select) select.disabled = true;
-  feedback.textContent = "千问正在读取完整原页并复核本页各行…";
+  feedback.textContent = `${label}正在读取完整原页并复核本页中间栏…`;
   try {
-    if (select?.dataset.reviewConfigured === "false") {
+    if (provider === "qwen" && select?.dataset.reviewConfigured === "false") {
       const endpoint = getAiVisionLineReviewEndpoint().replace(/\/line-review$/, "/review-models");
       const response = await fetch(endpoint, {cache: "no-store"});
       if (!response.ok) throw new Error(`千问配置状态检查失败：HTTP ${response.status}`);
@@ -5741,43 +5714,33 @@ async function reviewQwenWholePage(button, select, feedback) {
       select.dataset.reviewConfigured = String(Boolean(catalog.qwen?.configured));
       if (!catalog.qwen?.configured) throw new Error("千问服务尚未配置，请检查本地配置。");
     }
-    const compare = getOcrSourceCompare(original) || makeEmptyOcrCompare(original);
-    const base = getEffectiveOcrSideLines(compare.bdrc);
-    const ai = getEffectiveOcrSideLines(compare.llm, base);
-    const final = original.lines || [];
-    const rows = Array.from({length: Math.max(base.length, ai.length, final.length)}, (_, index) => {
-      const line = getSourceLineForRow(base[index], ai[index]) || final[index];
-      if (base[index]?.deleted || final[index]?.deleted || isPeripheralProofreadRegion(line)) return null;
-      const bbox = normalizeBbox(line?.bbox);
-      if (!bbox || line?.estimated) throw new Error("本页部分行缺少准确坐标，请先完成BDRC整页识别。");
-      return {index, bbox};
-    }).filter(Boolean);
-    if (!rows.length) throw new Error("本页没有可复核的原文行。");
+    const rows = collectCenterPageReviewRows(original);
     const blob = await getCurrentPageImageBlob();
     if (state.pageNum !== pageNum || state.cacheKey !== sourceKey) throw new Error("页面已切换，请返回原页重试。");
-    const form = new FormData();
-    form.append("file", blob, makePageImageName());
-    form.append("rows", JSON.stringify(rows));
-    form.append("model", select?.value || REVIEW_MODEL_DEFAULTS.qwen[0]);
-    const endpoint = getAiVisionLineReviewEndpoint().replace(/\/line-review$/, "/qwen-page-review");
-    const response = await fetch(endpoint, {method: "POST", body: form});
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    const endpoint = getAiVisionLineReviewEndpoint().replace(/\/line-review$/, `/${provider}-page-review`);
+    const payload = await requestWholePageReview(endpoint, blob, rows,
+      provider === "qwen" ? select?.value || REVIEW_MODEL_DEFAULTS.qwen[0] : "");
     if (state.cacheKey !== sourceKey || state.ocrResults.get(pageNum) !== original || JSON.stringify(original) !== before) {
       throw new Error("原文或校对结果已更改，未覆盖原结果，请重试。");
     }
-    compare.qwenReviews = mergeQwenPageReviews(compare.qwenReviews || [], payload, rows);
+    const compare = getOcrSourceCompare(original) || makeEmptyOcrCompare(original);
+    const key = provider === "qwen" ? "qwenReviews" : "openaiReviews";
+    compare[key] = mergePageReviews(compare[key] || [], payload, rows, provider);
     original.compare = compare;
     saveCachedResults();
     if (state.pageNum === pageNum) updateOcrPanelForPage();
-    setStatus(`第 ${pageNum} 页千问整页复核已保存（${rows.length} 行）。`, "ok");
+    setStatus(`第 ${pageNum} 页${label}整页复核已保存（${rows.length} 行）。`, "ok");
   } catch (error) {
-    feedback.textContent = `千问整页复核失败：${error.message || error}`;
+    feedback.textContent = `${label}整页复核失败：${error.message || error}`;
   } finally {
-    qwenPageReviewPending = false;
+    pageReviewPending = false;
     if (button.isConnected) button.disabled = false;
     if (select?.isConnected) select.disabled = false;
   }
+}
+
+async function reviewQwenWholePage(button, select, feedback) {
+  return reviewProviderWholePage("qwen", button, select, feedback);
 }
 
 function validateIndependentReviewText(value) {
@@ -6247,7 +6210,7 @@ function createModelInputPreview(sourceLine, index) {
         && !isDiagnosticOcrLine(recognizedLine) && sameLineCropMetadata(metadata, payload.review_image));
       note.textContent = usedByModel
         ? "已缓存 · 模型输入单行裁剪（按左→右排列）"
-        : "已缓存 · 裁剪预览供人工对照，千问使用整页原图";
+        : "已缓存 · 单行裁剪仅供人工对照；模型识别使用整页原图";
       if (compare?.qwen?.some((review) => review.index === index && review.reviewContext)) {
         note.textContent += "；千问还使用整页定位图和宽边界局部图";
       }
@@ -6775,96 +6738,26 @@ function clearSharedErrorMark(index, card, expectedProvider = "") {
 }
 
 async function reviewOcrLineWithAiVision(index, card, sourceLine, bdrcLine, aiLine) {
-  if (state.batchOcr?.running && card) {
-    setStatus("请先停止批量识别，再复核单个 block。", "warn");
+  if (state.batchOcr?.running) {
+    setStatus("请先停止批量识别，再进行整页复核。", "warn");
     return;
   }
-  const pageNum = state.pageNum;
-  const originalResult = state.ocrResults.get(pageNum);
-  const sourceKey = state.cacheKey;
-  const bbox = normalizeBbox(sourceLine?.bbox || getSourceLineForRow(aiLine, bdrcLine)?.bbox);
-  if (!bbox || sourceLine?.estimated) {
-    setStatus("这一行没有可靠的原图定位坐标，不能进行单行 Gemini Vision 复核。", "warn");
-    return;
-  }
-  const endpoint = getAiVisionLineReviewEndpoint();
-  if (!endpoint) {
-    setStatus("请先填写 Gemini Vision OCR 接口地址。", "warn");
-    return;
-  }
-
+  const endpoint = els.aiOcrEndpointInput.value.trim();
   const button = card?.querySelector(".proofread-ai-review-button");
   const feedback = card?.querySelector(".review-feedback");
-  const selectedModel = button?.dataset.reviewModel || "";
-  if (feedback) feedback.textContent = "Gemini Vision 复核中…";
-  if (button) {
-    button.disabled = true;
-    button.dataset.originalLabel = button.textContent || "重新识别";
-    button.textContent = "复核中…";
+  if (!endpoint) {
+    if (feedback) feedback.textContent = "Gemini Vision 服务地址未配置。";
+    return;
   }
+  if (button) button.disabled = true;
   try {
-    setStatus(`正在紧密裁剪并放大第 ${index + 1} 行，交给 Gemini Vision 复核…`, "warn");
     const blob = await getCurrentPageImageBlob();
-    const draftText = isDiagnosticOcrLine(aiLine)
-      ? String(bdrcLine?.text || "")
-      : String(aiLine?.text || bdrcLine?.text || "");
-    if (state.pageNum !== pageNum || state.cacheKey !== sourceKey) throw new Error("页面已切换，请返回原页面重试。");
-    const oldImage = aiLine?.reviewImage || sourceLine?.reviewImage || bdrcLine?.reviewImage || null;
-    const cropContext = makeLineCropContext();
-    const cropEntry = await getCachedLineCrop({ ...sourceLine, bbox }, index, oldImage, cropContext, blob);
-    const reviewImage = cropEntry.payload.review_image;
-    const parsed = await callAiVisionLineReviewEndpoint(endpoint, blob, bbox, draftText, selectedModel, reviewImage, sourceLine?.regionId || "");
-    const reviewedText = getParsedOcrText(parsed);
-    if (!reviewedText) {
-      throw new Error("Gemini Vision 未返回这一行的可用文字");
-    }
-
-    const result = state.ocrResults.get(pageNum);
-    if (!result || state.cacheKey !== sourceKey || result.raw !== originalResult?.raw) {
-      throw new Error("原文或识别结果已变更，请在原页面重新复核");
-    }
-    const compare = getOcrSourceCompare(result) || makeEmptyOcrCompare(result);
-    const targetLine = ensureProofreadLine(compare.llm.lines, index, sourceLine || bdrcLine);
-    targetLine.text = reviewedText;
-    targetLine.reviewImage = parsed.raw?.review_image || null;
-    try {
-      await saveModelInputCrop({ ...sourceLine, bbox }, index, targetLine.reviewImage, cropContext, "gemini", getOcrResponseModel(parsed.raw), blob);
-    } catch (error) {
-      setStatus(`识别成功，但模型输入图片缓存失败：${error.message}`, "warn");
-    }
-    targetLine.bbox = bbox;
-    targetLine.bboxApproximate = false;
-    targetLine.error = false;
-    targetLine.missing = false;
-    targetLine.diagnostic = false;
-    compare.llm.text = joinActiveOcrLines(compare.llm.lines);
-    compare.llm.returnedLineCount = countNonEmptyOcrLines(compare.llm.lines);
-    compare.llm.model = getOcrResponseModel(parsed.raw) || compare.llm.model || "Gemini Vision";
-    compare.llm.provider = getOcrResponseProvider(parsed.raw) || compare.llm.provider;
-    targetLine.provider = "gemini";
-    targetLine.model = compare.llm.model;
-    if (isMissingOcrTranscription(result.lines?.[index])) {
-      result.lines = result.lines.map((line, lineIndex) => lineIndex === index
-        ? { ...line, text: reviewedText, missing: false, error: false, diagnostic: false, model: compare.llm.model, recognitionSource: "ai-line-review" }
-        : line);
-      result.text = joinActiveOcrLines(result.lines);
-    }
-    result.compare = compare;
-    result.updatedAt = new Date().toISOString();
-    state.ocrResults.set(pageNum, result);
-    saveCachedResults();
-    if (state.pageNum === pageNum) updateOcrPanelForPage();
-    updateSummary();
-    setStatus(`第 ${index + 1} 行已由 Gemini Vision 单行复核；请确认后选择“采用 Gemini Vision”并保存。`, "ok");
+    await runTraditionalGeminiLines(endpoint, blob, button?.dataset.reviewModel || "");
   } catch (error) {
-    if (feedback) feedback.textContent = `Gemini Vision 复核失败：${formatNetworkError(error, endpoint, "ai-ocr")}`;
-    setStatus(`第 ${index + 1} 行 Gemini Vision 复核失败：${formatNetworkError(error, endpoint, "ai-ocr")}`, "error");
+    if (feedback) feedback.textContent = `Gemini 整页复核失败：${error.message || error}`;
+    setStatus(`Gemini 整页复核失败：${error.message || error}`, "error");
   } finally {
-    if (button?.isConnected) {
-      button.disabled = false;
-      button.innerHTML = '<i data-lucide="scan-search"></i><span>重新识别</span>';
-      if (window.lucide) window.lucide.createIcons();
-    }
+    if (button?.isConnected) button.disabled = false;
   }
 }
 
