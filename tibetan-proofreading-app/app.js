@@ -7920,16 +7920,12 @@ function clearCurrentTranslation() {
 }
 
 function downloadAllOcrText() {
-  const pages = [...state.ocrResults.entries()]
-    .map(([pageNum, result]) => [pageNum, String(result?.text || "").trim()])
-    .filter(([, text]) => text)
-    .sort((a, b) => a[0] - b[0]);
-
-  if (!pages.length) {
-    setStatus("还没有可下载的 OCR 校对结果。", "warn");
+  if (!state.pageCount) {
+    setStatus("请先加载文档，再导出所有页面的 OCR 结果。", "warn");
     return;
   }
 
+  const pages = Array.from({ length: state.pageCount }, (_, index) => [index + 1, state.ocrResults.get(index + 1) || null]);
   const body = buildProofreadMarkdown(pages, state.sourceName);
   const blob = new Blob(["\uFEFF", body], { type: "text/markdown;charset=utf-8" });
   const safeName = (state.sourceName || "bdrc-ocr").replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]+/g, "_");
@@ -7941,14 +7937,83 @@ function buildProofreadMarkdown(pages, sourceName) {
   return [
     `# ${stripFileExtension(sourceName || "藏文典籍")} 藏文 OCR 校对结果`,
     "",
-    ...pages.flatMap(([pageNum, text]) => [
-      `## 第 ${pageNum} 页`,
-      "",
-      text,
-      "",
-    ]),
+    "字数与错误数沿用工作台逐 block 的统计口径；空结果的错误率记为“—”，不代表识别正确。",
+    "",
+    ...pages.flatMap(([pageNum, result]) => buildOcrPageMarkdown(pageNum, result)),
     ...buildOcrModelQualityMarkdown(state.ocrQualityReviews),
   ].join("\n");
+}
+
+function formatOcrExportStats(totalChars, errorChars) {
+  return `共 ${totalChars} 字 · 错误 ${errorChars} 字 · 错误率 ${totalChars ? `${(errorChars / totalChars * 100).toFixed(1)}%` : "—"}`;
+}
+
+function formatOcrExportText(value) {
+  const content = String(value || "");
+  if (!content.trim()) return ["（空）", ""];
+  const longestTildeRun = Math.max(0, ...Array.from(content.matchAll(/~+/g), (match) => match[0].length));
+  const fence = "~".repeat(Math.max(3, longestTildeRun + 1));
+  return [`${fence}text`, content, fence, ""];
+}
+
+function buildOcrPageMarkdown(pageNum, result) {
+  const compare = getOcrSourceCompare(result);
+  const bdrcLines = compare ? getEffectiveOcrSideLines(compare.bdrc) : [];
+  const geminiLines = compare ? getEffectiveOcrSideLines(compare.llm, bdrcLines) : [];
+  const finalLines = result?.lines?.length ? result.lines : makeOcrLinesFromText(result?.text || "", bdrcLines);
+  const reviewSets = [compare?.qwenReviews || [], compare?.openaiReviews || []];
+  const rowCount = Math.max(
+    bdrcLines.length, geminiLines.length, finalLines.length,
+    ...reviewSets.map((reviews) => reviews.reduce((max, review) => Math.max(max, review.index + 1), 0)),
+  );
+  const models = [
+    { name: "BDRC", side: "bdrc", lines: bdrcLines, model: compare?.bdrc?.model || "" },
+    { name: "Gemini Vision", side: "llm", lines: geminiLines, model: compare?.llm?.model || "" },
+    { name: "千问", reviews: reviewSets[0] },
+    { name: "OpenAI", reviews: reviewSets[1] },
+  ];
+  const output = [`## 第 ${pageNum} 页`, "", "| 模型 | 共多少字 | 错误字数 | 错误率 |", "| --- | ---: | ---: | ---: |"];
+  const modelRows = models.map((model) => {
+    const rows = Array.from({ length: rowCount }, (_, index) => {
+      const candidate = model.reviews
+        ? model.reviews.find((review) => review.index === index)
+        : model.lines[index];
+      const content = !model.reviews && isDiagnosticOcrLine(candidate)
+        ? ""
+        : String(candidate?.text || "");
+      const totalChars = countOcrCharacters(content);
+      const stats = model.reviews
+        ? {
+            totalChars,
+            errorChars: Math.min(totalChars, Math.max(
+              countErrorRanges(content, candidate?.errorRanges || []),
+              Math.max(0, Number(candidate?.manualErrorChars || 0)),
+            )),
+          }
+        : getLineQualityStats(content ? candidate : { text: "" }, compare, model.side, index);
+      return { content, stats, model: String(candidate?.model || model.model || ""), deleted: Boolean(candidate?.deleted) };
+    });
+    const totalChars = rows.reduce((sum, row) => sum + row.stats.totalChars, 0);
+    const errorChars = rows.reduce((sum, row) => sum + row.stats.errorChars, 0);
+    output.push(`| ${model.name} | ${totalChars} | ${errorChars} | ${totalChars ? `${(errorChars / totalChars * 100).toFixed(1)}%` : "—"} |`);
+    return { name: model.name, rows, totalChars, errorChars };
+  });
+  output.push("");
+  for (const model of modelRows) {
+    output.push(`### ${model.name}`, "", formatOcrExportStats(model.totalChars, model.errorChars), "");
+    if (!model.rows.length) {
+      output.push(...formatOcrExportText(""));
+      continue;
+    }
+    model.rows.forEach((row, index) => {
+      output.push(`#### block ${String(index + 1).padStart(2, "0")}`, "");
+      if (row.model) output.push(`识别模型：${row.model}`, "");
+      if (row.deleted) output.push("状态：已从采用文本删除，候选结果仍保留。", "");
+      output.push(formatOcrExportStats(row.stats.totalChars, row.stats.errorChars), "", ...formatOcrExportText(row.content));
+    });
+  }
+  output.push("### 当前采用的校对文本", "", ...formatOcrExportText(result?.text || ""));
+  return output;
 }
 
 function getAiVisionModelMetadata(compare, result) {
