@@ -7,7 +7,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <title>藏文典籍翻译工作台</title>
-    <link rel="stylesheet" href="./styles.css?v=20261009-hide-duplicate-results-v61" />
+    <link rel="stylesheet" href="./styles.css?v=20261011-ocr-font-controls-v62" />
     <script src="./vendor/pdf.min.js" defer></script>
     <script src="./vendor/lucide.min.js" defer></script>
     <script src="./app.js?v=20261011-center-page-models-v2" defer></script>
@@ -307,8 +307,7 @@
                 aria-label="缩小右栏识别文字"
                 title="缩小右栏识别文字"
               >
-                <span class="font-size-glyph" aria-hidden="true">A</span>
-                <i data-lucide="minus"></i>
+                <span class="font-size-glyph" aria-hidden="true">A−</span>
               </button>
               <button
                 id="increaseOcrFontButton"
@@ -317,8 +316,7 @@
                 aria-label="放大右栏识别文字"
                 title="放大右栏识别文字"
               >
-                <span class="font-size-glyph" aria-hidden="true">A</span>
-                <i data-lucide="plus"></i>
+                <span class="font-size-glyph" aria-hidden="true">A+</span>
               </button>
             </div>
             <div id="batchOcrProgress" class="review-feedback" role="status" aria-live="polite"></div>

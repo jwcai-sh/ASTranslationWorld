@@ -1392,7 +1392,7 @@ body.is-resizing-panes * {
 .font-size-button {
   width: 36px;
   min-width: 36px;
-  gap: 0;
+  justify-content: center;
 }
 
 .font-size-button .font-size-glyph {
@@ -1400,14 +1400,6 @@ body.is-resizing-panes * {
   font-size: 14px;
   font-weight: 700;
   line-height: 1;
-}
-
-.font-size-button .lucide {
-  width: 11px;
-  height: 11px;
-  margin-left: -1px;
-  align-self: flex-start;
-  margin-top: 7px;
 }
 
 .view-switch-button {
