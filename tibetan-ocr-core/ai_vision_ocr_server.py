@@ -1666,7 +1666,16 @@ def center_page_prompt(rows: list[dict[str, Any]]) -> str:
 def parse_center_page_response(text: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     try:
         clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
-        returned = json.loads(clean)["lines"]
+        try:
+            payload = json.loads(clean)
+        except json.JSONDecodeError:
+            start = clean.find("{")
+            if start < 0:
+                raise
+            payload, _ = json.JSONDecoder().raw_decode(clean[start:])
+        returned = payload["lines"]
+        if not isinstance(returned, list):
+            raise ValueError("lines must be an array")
         expected = {row["index"] for row in rows}
         indexed = {item["index"]: item["text"] for item in returned
                    if isinstance(item, dict) and type(item.get("index")) is int and isinstance(item.get("text"), str)}
@@ -1677,6 +1686,28 @@ def parse_center_page_response(text: str, rows: list[dict[str, Any]]) -> list[di
         raise RuntimeError("整页识别结果行号不完整或内容无效，原结果保留，请重试。") from exc
 
 
+def call_model_aggregator_gemini_page(image_bytes: bytes, filename: str, prompt: str, model: str) -> dict[str, Any]:
+    """Use vision chat so the OCR-to-Markdown system prompt cannot override row JSON."""
+    model_ref = f"gemini:{model}"
+    raw = post_json(aggregator_url("/api/aggregate/chat"), {
+        "model": model_ref,
+        "temperature": 0,
+        "maxTokens": MAX_TOKENS,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": image_data_url(image_bytes, filename)}},
+        ]}],
+    }, AGGREGATOR_API_KEY)
+    if not raw.get("ok"):
+        raise RuntimeError(f"Gemini 整页复核失败：{redact_sensitive(str(raw.get('error') or '模型调用失败'))}")
+    resolved = str(raw.get("modelRef") or raw.get("model") or "").strip()
+    if resolved not in {model_ref, model}:
+        raise RuntimeError("Gemini 复核响应模型与所选模型不一致，结果未采用。")
+    if raw.get("finishReason") not in (None, "STOP"):
+        raise RuntimeError("Gemini 复核输出未完整结束，原结果保留。")
+    return {"text": str(raw.get("answer") or ""), "model": model_ref}
+
+
 def call_gemini_page_review(image_bytes: bytes, filename: str, rows: list, model: str = "") -> dict[str, Any]:
     if not USE_MODEL_AGGREGATOR:
         raise RuntimeError("Gemini 整页识别需要本地模型聚合服务。")
@@ -1684,8 +1715,7 @@ def call_gemini_page_review(image_bytes: bytes, filename: str, rows: list, model
     if model not in GEMINI_REVIEW_MODELS:
         raise RuntimeError("Gemini 复核模型不在允许列表中。")
     targets = normalize_center_page_rows(rows)
-    result = call_model_aggregator_images([(image_bytes, filename)], center_page_prompt(targets),
-                                          preserve_size=True, model_override=f"gemini:{model}")
+    result = call_model_aggregator_gemini_page(image_bytes, filename, center_page_prompt(targets), model)
     lines = parse_center_page_response(str(result.get("text") or ""), targets)
     return {"text": "\n".join(line["text"] for line in lines), "lines": lines,
             "model": result.get("model", f"gemini:{model}"), "provider": "gemini",
