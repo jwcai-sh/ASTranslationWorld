@@ -718,6 +718,51 @@ def run_traditional_region_ocr(
     return payload
 
 
+def run_page_ocr(image_bytes: bytes, profile_id: str = "", model_name: str = "",
+                 line_mode: str = "") -> dict[str, Any]:
+    """Recognize the original page once; layout labels never replace its text."""
+    payload = {**run_ocr(image_bytes, profile_id, model_name, line_mode),
+               "recognition_scope": "whole-page"}
+    if profile_id != "traditional" or detect_traditional_column_bboxes is None:
+        return payload
+    try:
+        regions = detect_traditional_column_bboxes(image_bytes)
+    except Exception:
+        # Optional display metadata must not invalidate a successful OCR result.
+        return payload
+    if not regions:
+        return payload
+
+    def overlap(box, region):
+        width = max(0, min(box["x"] + box["width"], region["x"] + region["width"])
+                    - max(box["x"], region["x"]))
+        height = max(0, min(box["y"] + box["height"], region["y"] + region["height"])
+                     - max(box["y"], region["y"]))
+        return width * height
+
+    lines = []
+    counts = {}
+    for source in payload.get("lines", []):
+        line = dict(source)
+        box = line.get("bbox")
+        if box:
+            region = max(regions, key=lambda candidate: overlap(box, candidate))
+            if overlap(box, region) > 0:
+                region_id = region["id"]
+                line.update(region_id=region_id, region_label=region.get("label", ""),
+                            region_role=region.get("role", ""),
+                            region_direction=region.get("direction", ""),
+                            region_line_index=counts.get(region_id, 0))
+                counts[region_id] = counts.get(region_id, 0) + 1
+        lines.append(line)
+    payload["lines"] = lines
+    # Do not populate regions: the frontend prefers nested region results over
+    # lines. Keep the original whole-page order, text and coordinates intact.
+    payload["layout_bboxes"] = regions
+    payload["layout_bbox_source"] = "traditional-columns"
+    return payload
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "BDRCOCRLocal/0.1"
 
@@ -732,6 +777,7 @@ class Handler(BaseHTTPRequestHandler):
                 load_bdrc_modules()
                 payload = {
                     "ok": True,
+                    "recognition_scope": "whole-page",
                     "model": MODEL_NAME,
                     "line_mode": LINE_MODE,
                     "profiles": OCR_PROFILES,
@@ -771,15 +817,7 @@ class Handler(BaseHTTPRequestHandler):
             profile_id = str(form.getfirst("ocr_profile", "")).strip()
             model_name = str(form.getfirst("bdrc_model", "")).strip()
             line_mode = str(form.getfirst("bdrc_line_mode", "")).strip()
-            payload = run_ocr(image_bytes, profile_id, model_name, line_mode)
-            if profile_id == "traditional":
-                payload = run_traditional_region_ocr(
-                    image_bytes,
-                    profile_id,
-                    model_name,
-                    line_mode,
-                    payload,
-                )
+            payload = run_page_ocr(image_bytes, profile_id, model_name, line_mode)
             self.send_json(payload)
         except Exception as exc:
             self.send_json({"error": str(exc)}, status=500)
