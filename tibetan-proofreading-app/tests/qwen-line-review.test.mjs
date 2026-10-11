@@ -4,7 +4,7 @@ import vm from 'node:vm';
 
 const storage = new Map();
 const elements = [];
-const ctx = vm.createContext({console, Event, window: {addEventListener() {}, localStorage: {
+const ctx = vm.createContext({console, Event, FormData, Blob, window: {addEventListener() {}, localStorage: {
   getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value),
 }}, document: {querySelector: () => null, createTextNode(text) {return {textContent:text};}, createElement() {
   const node = {children: [], dataset: {}, value: '', isConnected: true, handlers: {},
@@ -18,16 +18,19 @@ vm.runInContext(readFileSync(new URL('../app.js', import.meta.url), 'utf8'), ctx
 vm.runInContext(`
   state.pageNum=1; state.pageCount=2; state.cacheKey='test-qwen';
   state.ocrResults.set(1,{text:'original', lines:[{text:'original'}], source:'bdrc', compare:{
-    bdrc:{text:'BDRC',lines:[{text:'BDRC'}]}, llm:{text:'Gemini',lines:[{text:'Gemini'}]},
+    bdrc:{text:'BDRC',lines:[{text:'BDRC',bbox:{x:.1,y:.2,width:.4,height:.1}}]}, llm:{text:'Gemini',lines:[{text:'Gemini'}]},
     openaiReviews:[{index:0,text:'OpenAI',model:'test-openai'}]}});
   getAiVisionLineReviewEndpoint=()=> 'http://localhost/line-review';
-  getCurrentPageImageBlob=async()=>({});
+  getCurrentPageImageBlob=async()=>new Blob(["original-page"]);
   makeLineCropContext=()=>({cacheKey:state.cacheKey,pageNum:state.pageNum});
   getCachedLineCrop=async()=>({payload:{review_image:{crop_version:14}}});
   saveModelInputCrop=async()=>{};
-  callAiVisionLineReviewEndpoint=async(endpoint,blob,bbox,draft,model)=> {
-    if(!endpoint.endsWith('/qwen-line-review') || draft!=='' || model!=='qwen3.7-plus') throw Error('bad provider/model routing');
-    return {text:'བོད་',raw:{model:'qwen3.7-plus'}};
+  getCachedLineCrop=saveModelInputCrop=()=>{throw Error('Qwen must not use crop preview');};
+  fetch=async(endpoint,request)=> {
+    if(!endpoint.endsWith('/qwen-page-review') || request.body.get('model')!=='qwen3.7-plus') throw Error('bad provider/model routing');
+    if(await request.body.get('file').text()!=='original-page') throw Error('source pixels changed');
+    if(request.body.has('review_image')) throw Error('crop metadata leaked');
+    return {ok:true,json:async()=>({recognition_scope:'whole-page',model:'qwen3.7-plus',lines:[{index:0,text:'བོད་'}]})};
   };
   renderHomeDashboard=scheduleRemoteStateSave=updateOcrPanelForPage=()=>{};
   updateSummary=updateTranslationSummary=setStatus=()=>{};
@@ -36,7 +39,7 @@ vm.runInContext(`
 const selector = elements.find(node => node['aria-label']?.includes('千问复核模型'));
 selector.value = 'qwen3.7-plus';
 selector.dispatchEvent(new Event('change'));
-await elements.find(node => node.textContent === '千问 复核').handlers.click[0]({stopPropagation(){}});
+await elements.find(node => node.textContent === '千问整页复核').handlers.click[0]({stopPropagation(){}});
 const saved = JSON.parse(storage.get('test-qwen')).ocrResults['1'];
 assert.equal(saved.text, 'original');
 assert.equal(saved.compare.bdrc.text, 'BDRC');
@@ -104,7 +107,7 @@ console.log('Shared mark/clear controls route candidate selections independently
 // An old "unconfigured" catalog must be checked again after the AI service restarts.
 vm.runInContext("renderQwenLineReview(0,{bbox:{x:.1,y:.2,width:.4,height:.1}},null,null)", ctx);
 const restartedSelector = elements.filter(node => node['aria-label']?.includes('千问复核模型')).at(-1);
-const restartedButton = elements.filter(node => node.textContent === '千问 复核').at(-1);
+const restartedButton = elements.filter(node => node.textContent === '千问整页复核').at(-1);
 restartedSelector.dataset.reviewConfigured = 'false';
 restartedSelector.value = 'qwen3.7-plus';
 ctx.fetch = async url => {

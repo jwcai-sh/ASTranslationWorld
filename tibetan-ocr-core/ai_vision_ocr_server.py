@@ -1737,7 +1737,7 @@ def prepare_qwen_review_context(image_bytes: bytes, bbox: dict[str, float]) -> t
                     "local_size": {"width": local.width, "height": local.height}}
 
 
-def call_qwen_line_review(image_bytes: bytes, filename: str, bbox: dict[str, float], model: str) -> dict[str, Any]:
+def request_qwen_original_page(image_bytes: bytes, filename: str, model: str, prompt: str) -> tuple[str, str]:
     if model not in QWEN_REVIEW_MODELS:
         raise RuntimeError("千问复核模型不在允许列表中，请刷新模型列表。")
     if not QWEN_REVIEW_API_KEY or not QWEN_REVIEW_BASE_URL:
@@ -1748,17 +1748,9 @@ def call_qwen_line_review(image_bytes: bytes, filename: str, bbox: dict[str, flo
     host = upstream.hostname or ""
     if upstream.scheme != "https" or not (host.endswith(".aliyuncs.com") or host.endswith(".qianwenai.com")) or upstream.username or upstream.password or upstream.query or upstream.fragment:
         raise RuntimeError("千问接口必须是官方 HTTPS 地址，且不能在地址中包含凭据。")
-    tiles, metadata = prepare_line_review_images(image_bytes, bbox)
-    source_bbox = metadata.get("source_bbox") or bbox
-    context_images, context_metadata = prepare_qwen_review_context(image_bytes, source_bbox)
-    prompt = ("第1张是整页定位图，蓝色侧箭头指向目标行，只用于确定行序；第2张由原图直接截取且未遮罩，包含上下邻行，只用于核对目标行的上下加字。"
-              "此后各图是目标行从左到右的放大分片，相邻分片边缘有少量重叠，重叠文字只转录一次。"
-              "只逐字转录目标行的红字、叠字与标点；不要转录邻行、边框或页码，不按语义补写。"
-              "无法确认的字标记〔?〕。只输出这一行的原文，不解释、不翻译。")
-    content = [{"type": "text", "text": prompt}]
-    content.extend({"type": "image_url", "image_url": {"url": image_data_url(picture, "context.png")}, "max_pixels": 8388608}
-                   for picture in context_images)
-    content.extend({"type": "image_url", "image_url": {"url": image_data_url(tile, "line.png")}, "max_pixels": 8388608} for tile in tiles)
+    content = [{"type": "text", "text": prompt},
+               {"type": "image_url", "image_url": {"url": image_data_url(image_bytes, filename)},
+                "max_pixels": 8388608}]
     url = QWEN_REVIEW_BASE_URL if QWEN_REVIEW_BASE_URL.endswith("/chat/completions") else QWEN_REVIEW_BASE_URL + "/chat/completions"
     body = {"model": model, "messages": [{"role": "user", "content": content}], "temperature": 0, "max_tokens": MAX_TOKENS}
     if model in {"qwen3.8-max", "qwen3.7-plus"}:
@@ -1768,9 +1760,49 @@ def call_qwen_line_review(image_bytes: bytes, filename: str, bbox: dict[str, flo
     text = parse_model_text(raw).strip()
     if not text or not choices or choices[0].get("finish_reason") not in {None, "stop"}:
         raise RuntimeError("千问未返回完整的单行文字，请检查模型权限或重试。")
+    return text, raw.get("model", model)
+
+
+def call_qwen_line_review(image_bytes: bytes, filename: str, bbox: dict[str, float], model: str) -> dict[str, Any]:
+    # Compatibility for old clients: even a single-row request uses only the
+    # original full page, never saved preview bounds, masks or enlarged tiles.
+    prompt = ("图片是完整原页。请根据归一化坐标定位目标行：" + json.dumps(bbox) +
+              "。只转录该行的藏文、红字、叠字和标点，不按语义补写，不抄邻行。只输出原文。")
+    text, actual_model = request_qwen_original_page(image_bytes, filename, model, prompt)
     text = validate_qwen_transcript(text)
-    return {"text": text, "lines": [{"text": text, "bbox": bbox}], "model": raw.get("model", model), "provider": "qwen", "line_review": True,
-            "review_image": metadata, "review_context": context_metadata}
+    return {"text": text, "lines": [{"text": text, "bbox": bbox}], "model": actual_model,
+            "provider": "qwen", "line_review": True, "recognition_scope": "whole-page"}
+
+
+def call_qwen_page_review(image_bytes: bytes, filename: str, rows: list, model: str) -> dict[str, Any]:
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 200:
+        raise RuntimeError("千问整页复核需要有效的原文行坐标。")
+    targets = []
+    seen = set()
+    for row in rows:
+        index = row.get("index")
+        if type(index) is not int or index < 0 or index in seen:
+            raise RuntimeError("千问整页复核行号无效或重复。")
+        seen.add(index)
+        targets.append({"index": index, "bbox": parse_normalized_bbox(json.dumps(row.get("bbox")))})
+    prompt = ("图片是未经裁剪的完整原页。请一次识别以下所有目标行，坐标为原页0到1的归一化坐标：" +
+              json.dumps(targets, ensure_ascii=False) +
+              '。只按原图逐字转录藏文、红字、叠字、祥云符号和标点，不按语义补写。不要混入左右边栏。'
+              '每个index只返回一次，保留给定index，不重新编号。只输出JSON：'
+              '{"lines":[{"index":0,"text":"原文"}]}。不得省略目标行。无法辨认的字用〔?〕。')
+    text, actual_model = request_qwen_original_page(image_bytes, filename, model, prompt)
+    try:
+        clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
+        returned = json.loads(clean)["lines"]
+        indexed = {row["index"]: row["text"] for row in returned
+                   if type(row.get("index")) is int and isinstance(row.get("text"), str)}
+        if len(returned) != len(targets) or len(indexed) != len(targets) or set(indexed) != seen:
+            raise ValueError("missing or duplicate row")
+        lines = [{**row, "text": validate_qwen_transcript(indexed[row["index"]])} for row in targets]
+    except (ValueError, TypeError, KeyError, AttributeError, RuntimeError) as exc:
+        raise RuntimeError("千问整页结果行号不完整或内容无效，原结果保留，请重试。") from exc
+    return {"text": "\n".join(row["text"] for row in lines), "lines": lines,
+            "model": actual_model, "provider": "qwen", "recognition_scope": "whole-page"}
 
 
 def review_models_payload() -> dict[str, Any]:
@@ -1807,6 +1839,7 @@ def health_payload() -> dict[str, Any]:
         return {
             "ok": upstream_ok,
             "line_crop_version": LINE_CROP_VERSION,
+            "qwen_recognition_scope": "whole-page",
             "model": MODEL,
             "models": AGGREGATOR_MODELS or [MODEL],
             "allow_fallback": AGGREGATOR_ALLOW_FALLBACK,
@@ -1822,6 +1855,7 @@ def health_payload() -> dict[str, Any]:
     return {
         "ok": True,
         "line_crop_version": LINE_CROP_VERSION,
+            "qwen_recognition_scope": "whole-page",
         "model": MODEL,
         "base_url": BASE_URL,
         "upstream": chat_completions_url(),
@@ -1850,7 +1884,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.rstrip("/")
-        if path not in {"/ocr", "/layout", "/line-review", "/openai-line-review", "/qwen-line-review", "/line-preview", "/line-layout"}:
+        if path not in {"/ocr", "/layout", "/line-review", "/openai-line-review", "/qwen-line-review", "/qwen-page-review", "/line-preview", "/line-layout"}:
             self.send_json({"error": "Not found"}, status=404)
             return
 
@@ -1951,8 +1985,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(payload)
                 return
 
+            if path == "/qwen-page-review":
+                payload = call_qwen_page_review(image_bytes, filename, json.loads(field_value(form, "rows") or "[]"), field_value(form, "model"))
+                self.send_json(payload)
+                return
             if path == "/qwen-line-review":
-                payload = call_qwen_line_review(image_bytes, filename, resolve_saved_review_bbox(image_bytes, parse_normalized_bbox(field_value(form, "bbox")), json.loads(field_value(form, "review_image") or "{}")), field_value(form, "model"))
+                payload = call_qwen_line_review(image_bytes, filename, parse_normalized_bbox(field_value(form, "bbox")), field_value(form, "model"))
                 self.send_json(payload)
                 return
 

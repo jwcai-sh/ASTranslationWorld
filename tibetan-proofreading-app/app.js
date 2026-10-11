@@ -1,6 +1,7 @@
 const SAMPLE_PDF_URL = "../藏文/天文历算学-本科教材 藏文40301698_部分.pdf";
 const PDF_WORKER_URL = "./vendor/pdf.worker.min.js";
-const APP_BUILD_ID = "20261009-left-vertical-preview-v33";
+const APP_BUILD_ID = "20261011-qwen-whole-page";
+let qwenPageReviewPending = false;
 const REVIEW_MODEL_DEFAULTS = { qwen: ["qwen3.8-max", "qwen3.7-plus"], gemini: ["gemini-2.5-flash", "gemini-3.1-flash-lite"] };
 const reviewCatalogRequests = new Map();
 const SOURCE_LAYOUT_VERSION = 4;
@@ -5580,9 +5581,9 @@ function renderIndependentLineReview(provider, index, sourceLine, bdrcLine, aiLi
   const button = document.createElement("button");
   button.type = "button";
   button.className = "ghost-button compact";
-  button.textContent = `${label} 复核`;
-  button.setAttribute("aria-label", `第 ${index + 1} 行 ${label} 复核`);
-  button.title = `裁剪放大这一行，通过 ${label} API 独立复核；费用以服务商账号为准。`;
+  button.textContent = provider === "qwen" ? "千问整页复核" : `${label} 复核`;
+  button.setAttribute("aria-label", provider === "qwen" ? "千问整页复核，更新本页千问结果" : `第 ${index + 1} 行 ${label} 复核`);
+  button.title = provider === "qwen" ? "使用完整原图，一次复核并更新本页各行千问结果；裁剪预览仅供人工对照。" : `裁剪放大这一行，通过 ${label} API 独立复核；费用以服务商账号为准。`;
   button.disabled = !normalizeBbox(sourceLine?.bbox) || Boolean(sourceLine?.estimated);
   const feedback = document.createElement("div");
   feedback.className = "openai-review-feedback";
@@ -5651,6 +5652,10 @@ function renderIndependentLineReview(provider, index, sourceLine, bdrcLine, aiLi
       feedback.textContent = "请先停止批量识别，再复核单个 block。";
       return;
     }
+    if (provider === "qwen") {
+      await reviewQwenWholePage(button, select, feedback);
+      return;
+    }
     const pageNum = state.pageNum;
     const sourceKey = state.cacheKey;
     const original = state.ocrResults.get(pageNum);
@@ -5696,6 +5701,83 @@ function renderIndependentLineReview(provider, index, sourceLine, bdrcLine, aiLi
     }
   });
   return group;
+}
+
+function mergeQwenPageReviews(previous, payload, rows) {
+  const incoming = payload?.lines;
+  const expected = new Set(rows.map(row => row.index));
+  if (payload?.recognition_scope !== "whole-page" || !Array.isArray(incoming)
+      || incoming.length !== rows.length || new Set(incoming.map(row => row.index)).size !== rows.length
+      || incoming.some(row => !Number.isInteger(row.index) || !expected.has(row.index))) {
+    throw new Error("千问整页结果行号不完整，原结果保留。");
+  }
+  const updated = incoming.map(row => ({index: row.index,
+    text: validateIndependentReviewText(row.text),
+    bbox: rows.find(target => target.index === row.index).bbox,
+    provider: "qwen", model: payload.model, recognitionScope: "whole-page",
+    reviewedAt: new Date().toISOString()}));
+  return [...previous.filter(row => !expected.has(row.index)), ...updated];
+}
+
+async function reviewQwenWholePage(button, select, feedback) {
+  if (qwenPageReviewPending) {
+    feedback.textContent = "千问正在复核整页，请等待完成。";
+    return;
+  }
+  const pageNum = state.pageNum;
+  const sourceKey = state.cacheKey;
+  const original = state.ocrResults.get(pageNum);
+  const before = JSON.stringify(original);
+  qwenPageReviewPending = true;
+  button.disabled = true;
+  if (select) select.disabled = true;
+  feedback.textContent = "千问正在读取完整原页并复核本页各行…";
+  try {
+    if (select?.dataset.reviewConfigured === "false") {
+      const endpoint = getAiVisionLineReviewEndpoint().replace(/\/line-review$/, "/review-models");
+      const response = await fetch(endpoint, {cache: "no-store"});
+      if (!response.ok) throw new Error(`千问配置状态检查失败：HTTP ${response.status}`);
+      const catalog = await response.json();
+      select.dataset.reviewConfigured = String(Boolean(catalog.qwen?.configured));
+      if (!catalog.qwen?.configured) throw new Error("千问服务尚未配置，请检查本地配置。");
+    }
+    const compare = getOcrSourceCompare(original) || makeEmptyOcrCompare(original);
+    const base = getEffectiveOcrSideLines(compare.bdrc);
+    const ai = getEffectiveOcrSideLines(compare.llm, base);
+    const final = original.lines || [];
+    const rows = Array.from({length: Math.max(base.length, ai.length, final.length)}, (_, index) => {
+      const line = getSourceLineForRow(base[index], ai[index]) || final[index];
+      if (base[index]?.deleted || final[index]?.deleted || isPeripheralProofreadRegion(line)) return null;
+      const bbox = normalizeBbox(line?.bbox);
+      if (!bbox || line?.estimated) throw new Error("本页部分行缺少准确坐标，请先完成BDRC整页识别。");
+      return {index, bbox};
+    }).filter(Boolean);
+    if (!rows.length) throw new Error("本页没有可复核的原文行。");
+    const blob = await getCurrentPageImageBlob();
+    if (state.pageNum !== pageNum || state.cacheKey !== sourceKey) throw new Error("页面已切换，请返回原页重试。");
+    const form = new FormData();
+    form.append("file", blob, makePageImageName());
+    form.append("rows", JSON.stringify(rows));
+    form.append("model", select?.value || REVIEW_MODEL_DEFAULTS.qwen[0]);
+    const endpoint = getAiVisionLineReviewEndpoint().replace(/\/line-review$/, "/qwen-page-review");
+    const response = await fetch(endpoint, {method: "POST", body: form});
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    if (state.cacheKey !== sourceKey || state.ocrResults.get(pageNum) !== original || JSON.stringify(original) !== before) {
+      throw new Error("原文或校对结果已更改，未覆盖原结果，请重试。");
+    }
+    compare.qwenReviews = mergeQwenPageReviews(compare.qwenReviews || [], payload, rows);
+    original.compare = compare;
+    saveCachedResults();
+    if (state.pageNum === pageNum) updateOcrPanelForPage();
+    setStatus(`第 ${pageNum} 页千问整页复核已保存（${rows.length} 行）。`, "ok");
+  } catch (error) {
+    feedback.textContent = `千问整页复核失败：${error.message || error}`;
+  } finally {
+    qwenPageReviewPending = false;
+    if (button.isConnected) button.disabled = false;
+    if (select?.isConnected) select.disabled = false;
+  }
 }
 
 function validateIndependentReviewText(value) {
@@ -6165,7 +6247,7 @@ function createModelInputPreview(sourceLine, index) {
         && !isDiagnosticOcrLine(recognizedLine) && sameLineCropMetadata(metadata, payload.review_image));
       note.textContent = usedByModel
         ? "已缓存 · 模型输入单行裁剪（按左→右排列）"
-        : "已缓存 · 单行裁剪预览（重新识别后保存为模型输入）";
+        : "已缓存 · 裁剪预览供人工对照，千问使用整页原图";
       if (compare?.qwen?.some((review) => review.index === index && review.reviewContext)) {
         note.textContent += "；千问还使用整页定位图和宽边界局部图";
       }

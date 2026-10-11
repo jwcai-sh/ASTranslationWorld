@@ -59,7 +59,7 @@ class ProviderReviewTests(unittest.TestCase):
         metadata['source_size']['height'] = 31
         self.assertEqual(server.resolve_saved_review_bbox(out.getvalue(), current, metadata), current)
 
-    def test_qwen_preserves_selected_model_and_crop(self):
+    def test_qwen_uses_only_unchanged_whole_page_and_selected_model(self):
         from io import BytesIO
         from PIL import Image
         import base64
@@ -68,24 +68,64 @@ class ProviderReviewTests(unittest.TestCase):
         output = BytesIO(); page.save(output, format='PNG')
         target = {'x': .1, 'y': .25, 'width': .8, 'height': .25}
         raw = {'model': 'qwen3.7-plus', 'choices': [{'finish_reason': 'stop', 'message': {'content': 'བོད་'}}]}
-        with patch.object(server, 'QWEN_REVIEW_API_KEY', 'test-only'), patch.object(server, 'QWEN_REVIEW_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1'), patch.object(server, 'prepare_line_review_images', return_value=([b'png'], {'crop': 'tight', 'source_bbox': target})), patch.object(server, 'post_json', return_value=raw) as request:
+        with patch.object(server, 'QWEN_REVIEW_API_KEY', 'test-only'), patch.object(server, 'QWEN_REVIEW_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1'), patch.object(server, 'prepare_line_review_images') as crop, patch.object(server, 'prepare_qwen_review_context') as context, patch.object(server, 'post_json', return_value=raw) as request:
             result = server.call_qwen_line_review(output.getvalue(), 'page.png', target, 'qwen3.7-plus')
             url, body, key = request.call_args.args
             self.assertTrue(url.endswith('/chat/completions'))
             self.assertEqual(body['model'], 'qwen3.7-plus')
             self.assertFalse(body['enable_thinking'])
-            self.assertEqual(body['messages'][0]['content'][1]['max_pixels'], 8388608)
             content = body['messages'][0]['content']
-            self.assertEqual(len(content), 4)  # prompt, page, raw wide band, row tile
-            self.assertIn('重叠文字只转录一次', content[0]['text'])
-            wide = Image.open(BytesIO(base64.b64decode(content[2]['image_url']['url'].split(',', 1)[1])))
-            local_bbox = result['review_context']['local_bbox']
-            self.assertLess(local_bbox['y'], round(target['y'] * page.height))
-            self.assertGreater(local_bbox['y'] + local_bbox['height'], round((target['y'] + target['height']) * page.height))
-            self.assertEqual(wide.getpixel((400 - local_bbox['x'], 116 - local_bbox['y'])), (175, 175, 175))
-            self.assertEqual(result['provider'], 'qwen')
-            self.assertEqual(result['review_image']['crop'], 'tight')
+            self.assertEqual(len(content), 2)  # prompt plus untouched original page
+            encoded = content[1]['image_url']['url'].split(',', 1)[1]
+            self.assertEqual(base64.b64decode(encoded), output.getvalue())
+            crop.assert_not_called()
+            context.assert_not_called()
+            self.assertEqual(result['recognition_scope'], 'whole-page')
+            self.assertNotIn('review_image', result)
             self.assertEqual(result['text'], 'བོད་')
+
+    def test_qwen_page_maps_rows_by_id_and_rejects_partial_or_duplicate_output(self):
+        import json
+        rows = [{'index': 0, 'bbox': {'x': .1, 'y': .1, 'width': .8, 'height': .1}},
+                {'index': 2, 'bbox': {'x': .1, 'y': .3, 'width': .8, 'height': .1}}]
+        with patch.object(server, 'request_qwen_original_page', return_value=(json.dumps({'lines': [
+                {'index': 2, 'text': 'བོད་'}, {'index': 0, 'text': '༄༅། ཀ་'}]}), 'qwen3.7-plus')) as request:
+            result = server.call_qwen_page_review(b'original-page', 'page.png', rows, 'qwen3.7-plus')
+            request.assert_called_once()
+            self.assertEqual(request.call_args.args[0], b'original-page')
+            self.assertEqual([line['index'] for line in result['lines']], [0, 2])
+            self.assertEqual(result['lines'][0]['text'], '༄༅། ཀ་')
+        for lines in [[{'index': 0, 'text': 'ཀ་'}],
+                      [{'index': 0, 'text': 'ཀ་'}, {'index': 0, 'text': 'ཀ་'}],
+                      [{'index': 0, 'text': 'ཀ་'}, {'index': 2, 'text': 'unrelated answer'}]]:
+            with patch.object(server, 'request_qwen_original_page', return_value=(json.dumps({'lines': lines}), 'qwen3.7-plus')):
+                with self.assertRaisesRegex(RuntimeError, '原结果保留'):
+                    server.call_qwen_page_review(b'original-page', 'page.png', rows, 'qwen3.7-plus')
+
+    def test_qwen_page_http_route_ignores_crop_metadata(self):
+        import json
+        import urllib.request
+        from threading import Thread
+        from http.server import ThreadingHTTPServer
+        rows = [{'index': 0, 'bbox': {'x': .1, 'y': .1, 'width': .8, 'height': .1}}]
+        fields = {'rows': json.dumps(rows), 'model': 'qwen3.7-plus', 'review_image': 'invalid-old-crop'}
+        body = b''
+        for key, value in fields.items():
+            body += (f'--qboundary\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n').encode()
+        body += b'--qboundary\r\nContent-Disposition: form-data; name="file"; filename="page.png"\r\nContent-Type: image/png\r\n\r\noriginal-page\r\n--qboundary--\r\n'
+        http = ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
+        worker = Thread(target=http.serve_forever, daemon=True); worker.start()
+        try:
+            with patch.object(server, 'request_qwen_original_page', return_value=(json.dumps({'lines':[{'index':0,'text':'བོད་'}]}), 'qwen3.7-plus')) as request:
+                req = urllib.request.Request(f'http://127.0.0.1:{http.server_port}/qwen-page-review', body,
+                                             {'Content-Type':'multipart/form-data; boundary=qboundary'})
+                with urllib.request.urlopen(req, timeout=3) as response:
+                    result = json.load(response)
+                self.assertEqual(result['recognition_scope'], 'whole-page')
+                self.assertEqual(request.call_args.args[0], b'original-page')
+                request.assert_called_once()
+        finally:
+            http.shutdown(); http.server_close(); worker.join()
 
     def test_qwen_missing_key_bad_model_or_host_never_sends(self):
         with patch.object(server, 'post_json') as request:
