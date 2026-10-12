@@ -2,7 +2,7 @@ const SAMPLE_PDF_URL = "../藏文/天文历算学-本科教材 藏文40301698_�
 const PDF_WORKER_URL = "./vendor/pdf.worker.min.js";
 const APP_BUILD_ID = "20261011-center-page-models";
 let pageReviewPending = false;
-const REVIEW_MODEL_DEFAULTS = { qwen: ["qwen3.8-max", "qwen3.7-plus"], gemini: ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"] };
+const REVIEW_MODEL_DEFAULTS = { qwen: ["qwen3.8-max", "qwen3.7-plus"], gemini: ["gemini-3.8-flash", "gemini-3.1-flash-lite"] };
 const reviewCatalogRequests = new Map();
 const SOURCE_LAYOUT_VERSION = 4;
 window.__TIBETAN_PROOFREADING_APP_BUILD_ID__ = APP_BUILD_ID;
@@ -5491,7 +5491,7 @@ function renderReviewModelSelector(provider, index, onCatalog = null) {
   const fill = (availableModels) => {
     const models = provider === "qwen"
       ? availableModels.filter((model) => model !== "qwen3.5-ocr")
-      : availableModels;
+      : availableModels.filter((model) => model !== "gemini-2.5-flash");
     const chosen = select.value || preferred;
     select.replaceChildren();
     for (const model of models) {
@@ -6411,12 +6411,9 @@ function renderProofreadEditorGroup({ index, side, label, line, peerLine, compar
   labelMeta.textContent = `${sourceLabel} 识别结果`;
   const statusEl = document.createElement("em");
   statusEl.className = "proofread-editor-status";
+  // Keep this hook in the header for review controls, but show diagnostics only
+  // in the result editor below so the same error is not repeated twice.
   statusEl.hidden = true;
-  if (line?.recognitionError) {
-    statusEl.textContent = line.recognitionError;
-    statusEl.hidden = false;
-    statusEl.style.color = "#b42318";
-  }
   const qualityEl = document.createElement("div");
   qualityEl.className = "proofread-line-quality proofread-result-quality";
   const updateQuality = () => {
@@ -6451,10 +6448,13 @@ function renderProofreadEditorGroup({ index, side, label, line, peerLine, compar
     group.classList.toggle("has-diagnostic", diagnostic);
     editor.classList.toggle("is-empty", !text.trim() && !diagnostic);
     editor.classList.toggle("is-diagnostic", diagnostic);
-    statusEl.hidden = !diagnostic;
-    statusEl.textContent = diagnostic ? (line?.recognitionError || visibleText) : "";
+    statusEl.hidden = true;
+    statusEl.textContent = "";
     if (diagnostic) {
-      editor.textContent = visibleText;
+      const recognitionError = String(line?.recognitionError || "").trim();
+      editor.textContent = recognitionError && !visibleText.includes(recognitionError)
+        ? `${visibleText}\n${recognitionError}`
+        : visibleText;
     } else {
       renderOcrLineMarkup(editor, text, {
         highlightDiff: false,
@@ -6462,7 +6462,7 @@ function renderProofreadEditorGroup({ index, side, label, line, peerLine, compar
         sharedErrorRanges: getSharedErrorRanges(compare, side, index, text),
       });
     }
-    if (!text.trim()) {
+    if (!text.trim() && !diagnostic) {
       editor.textContent = editor.dataset.placeholder;
     }
   };
