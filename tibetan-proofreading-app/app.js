@@ -2,7 +2,7 @@ const SAMPLE_PDF_URL = "../藏文/天文历算学-本科教材 藏文40301698_�
 const PDF_WORKER_URL = "./vendor/pdf.worker.min.js";
 const APP_BUILD_ID = "20261011-center-page-models";
 let pageReviewPending = false;
-const REVIEW_MODEL_DEFAULTS = { qwen: ["qwen3.8-max", "qwen3.7-plus"], gemini: ["gemini-2.5-flash", "gemini-3.1-flash-lite"] };
+const REVIEW_MODEL_DEFAULTS = { qwen: ["qwen3.8-max", "qwen3.7-plus"], gemini: ["gemini-3.1-flash-lite", "gemini-2.5-flash"] };
 const reviewCatalogRequests = new Map();
 const SOURCE_LAYOUT_VERSION = 4;
 window.__TIBETAN_PROOFREADING_APP_BUILD_ID__ = APP_BUILD_ID;
@@ -536,28 +536,27 @@ function wireEvents() {
 
   els.ocrText.addEventListener("input", () => {
     if (!state.pageCount) return;
-    if (els.ocrText.value.trim()) {
-      const existing = state.ocrResults.get(state.pageNum) || {};
-      const textLines = els.ocrText.value.split("\n");
-      const existingLines = existing.lines || extractOcrLines(existing.raw);
-      const lines = existingLines.map((line, index) => ({
-        ...line,
-        text: textLines[index] ?? "",
-      }));
-      for (let index = existingLines.length; index < textLines.length; index += 1) {
-        lines.push({ text: textLines[index], bbox: null, index });
-      }
-      state.ocrResults.set(state.pageNum, {
-        ...existing,
-        text: els.ocrText.value,
-        lines,
-        source: existing.source || "manual",
-        updatedAt: new Date().toISOString(),
-      });
-    } else {
-      state.ocrResults.delete(state.pageNum);
+    const existing = state.ocrResults.get(state.pageNum) || {};
+    const textLines = els.ocrText.value.split("\n");
+    const existingLines = existing.lines || extractOcrLines(existing.raw);
+    const lines = existingLines.map((line, index) => ({
+      ...line,
+      text: textLines[index] ?? "",
+    }));
+    for (let index = existingLines.length; index < textLines.length; index += 1) {
+      lines.push({ text: textLines[index], bbox: null, index });
     }
-    saveCachedResults();
+    const compare = syncTextViewEditsToAdoptedModels(existing, lines, textLines);
+    state.ocrResults.set(state.pageNum, {
+      ...existing,
+      text: els.ocrText.value,
+      lines,
+      ...(compare ? { compare } : {}),
+      source: existing.source || "manual",
+      updatedAt: new Date().toISOString(),
+    });
+    const saved = saveCachedResults() !== false;
+    setStatus(saved ? "当前页各 block 的修改已自动保存。" : "当前页修改未能保存，请重试。", saved ? "ok" : "error");
     renderOcrLineComparison();
     updateSummary();
     updateThumbnailState();
@@ -2161,8 +2160,8 @@ async function loadMarkdown(file) {
   els.sourceTitle.textContent = state.sourceName;
   els.ocrTitle.textContent = isPlainText ? "文本文件" : "Markdown 文本";
   const restored = restoreCachedResults();
-  const hasRestoredText = Boolean((state.ocrResults.get(1)?.text || "").trim());
-  if (!hasRestoredText) {
+  const hasRestoredResult = state.ocrResults.has(1);
+  if (!hasRestoredResult) {
     state.ocrResults.set(1, {
       text,
       lines: text.split("\n").map((line, index) => ({ text: line, bbox: null, index })),
@@ -2174,7 +2173,7 @@ async function loadMarkdown(file) {
     saveCachedResults();
   }
   setStatus(
-    restored && hasRestoredText
+    restored && hasRestoredResult
       ? `已载入 ${isPlainText ? "文本" : "Markdown"} ${state.sourceName}，并恢复本地暂存的 OCR/译文。`
       : `已载入 ${isPlainText ? "文本" : "Markdown"} ${state.sourceName}，可直接校对或翻译。`,
     "ok"
@@ -2205,15 +2204,15 @@ async function loadWord(file) {
   els.sourceTitle.textContent = state.sourceName;
   els.ocrTitle.textContent = "Word 文本";
   const restored = restoreCachedResults();
-  const hasRestoredText = Boolean((state.ocrResults.get(1)?.text || "").trim());
-  if (!hasRestoredText) {
+  const hasRestoredResult = state.ocrResults.has(1);
+  if (!hasRestoredResult) {
     state.ocrResults.set(1, makeTextResult(text, "word-text"));
   }
   if (!restored) {
     saveCachedResults();
   }
   setStatus(
-    restored && hasRestoredText
+    restored && hasRestoredResult
       ? `已载入 Word ${state.sourceName}，并恢复本地暂存的 OCR/译文。`
       : `已载入 Word ${state.sourceName}，已直接提取文本，可直接翻译。`,
     "ok"
@@ -2476,8 +2475,6 @@ function serializeResultMap(map) {
   const output = {};
   for (const [pageNum, result] of map.entries()) {
     const text = result?.text || "";
-    const hasDeletedLine = (result?.lines || []).some((line) => line?.deleted);
-    if (!text.trim() && !hasDeletedLine && !normalizeOcrCompare(result?.compare)) continue;
     output[pageNum] = {
       text,
       raw: result.raw || null,
@@ -5047,6 +5044,13 @@ function renderOcrLineComparison() {
       rowHeader.title = `${line.regionLabel}第 ${Number(line.regionLineIndex || 0) + 1} 行`;
     }
 
+    const saveStatus = document.createElement("span");
+    saveStatus.className = "proofread-autosave-status";
+    saveStatus.setAttribute("role", "status");
+    saveStatus.setAttribute("aria-live", "polite");
+    saveStatus.textContent = "修改自动保存";
+    rowHeader.append(saveStatus);
+
     const content = document.createElement("div");
     content.className = "ocr-line-content";
 
@@ -5074,7 +5078,9 @@ function renderOcrLineComparison() {
       line.text = editor.value || "";
       renderOcrLineMarkup(preview, line.text, {manualEditRanges: getManualEditRanges(line)});
       resizeLineEditor(editor);
-      syncLineEditorsToResult(lines);
+      const saved = syncLineEditorsToResult(lines);
+      saveStatus.textContent = saved ? "已自动保存" : "保存失败，请重试";
+      saveStatus.classList.toggle("is-error", !saved);
     });
 
     content.appendChild(preview);
@@ -5181,12 +5187,14 @@ function setProofreadBlockDeleted(index, deleted) {
   if (compare) result.compare = compare;
   result.updatedAt = new Date().toISOString();
   state.ocrResults.set(state.pageNum, result);
-  saveCachedResults();
+  const saved = saveCachedResults() !== false;
   updateOcrPanelForPage();
   updateSummary();
   updateThumbnailState();
-  setStatus(deleted ? `已删除第 ${index + 1} 个 block 的 OCR 结果；原文保留，可撤销。` : `已恢复第 ${index + 1} 个 block 的 OCR 结果。`, "ok");
-  return true;
+  setStatus(saved
+    ? (deleted ? `已删除并自动保存第 ${index + 1} 个 block 的 OCR 结果；原文保留，可撤销。` : `已恢复并自动保存第 ${index + 1} 个 block 的 OCR 结果。`)
+    : `第 ${index + 1} 个 block 的删除状态未能保存，请重试。`, saved ? "ok" : "error");
+  return saved;
 }
 
 function renderDeletedProofreadBlockCard(index) {
@@ -5773,8 +5781,9 @@ function updateIndependentReviewText(provider, index, value) {
   candidate.updatedAt = new Date().toISOString();
   result.updatedAt = candidate.updatedAt;
   if (syncAdoptedProofreadText(result, index, provider, candidate, wasAdopted)) updateProofreadSummaryAfterEdit();
-  showProofreadAutoSaveStatus(index, saveCachedResults() !== false);
-  return true;
+  const saved = saveCachedResults() !== false;
+  showProofreadAutoSaveStatus(index, saved);
+  return saved;
 }
 
 function updateManualEditTracking(target, nextText, baselineText = target?.manualBaselineText ?? target?.text ?? "") {
@@ -6541,6 +6550,50 @@ function syncAdoptedProofreadText(result, index, provider, line, wasAdopted) {
 
 function updateProofreadSummaryAfterEdit() {
   if (els.ocrText && els.charCount && els.recognizedCount) updateSummary();
+}
+
+function syncTextViewEditsToAdoptedModels(existing, lines, textLines) {
+  const compare = existing.compare;
+  const previousLines = existing.lines || [];
+  if (!compare || !previousLines.length) return compare;
+  const withoutTrailingEmpty = (items) => {
+    let count = items.length;
+    while (count > 0 && !String(items[count - 1]?.text ?? items[count - 1] ?? "").trim()) count -= 1;
+    return count;
+  };
+  if (previousLines.length !== textLines.length
+      && withoutTrailingEmpty(previousLines) !== withoutTrailingEmpty(textLines)) return compare;
+  let bdrcChanged = false;
+  let llmChanged = false;
+  previousLines.forEach((previousLine, index) => {
+    if (index >= textLines.length || previousLine.text === lines[index].text) return;
+    const provider = getProofreadDefaultChoice(previousLine, compare.bdrc?.lines?.[index], compare.llm?.lines?.[index]);
+    const reviewKey = provider === "qwen" || provider === "openai" ? `${provider}Reviews` : "";
+    const candidate = reviewKey
+      ? compare[reviewKey]?.find((review) => review.index === index)
+      : compare[provider]?.lines?.[index];
+    if (!candidate) return;
+    const baseline = candidate.manualBaselineText ?? candidate.text ?? "";
+    candidate.text = lines[index].text;
+    updateManualEditTracking(candidate, candidate.text, baseline);
+    lines[index].adoptedProvider = provider;
+    lines[index].manualBaselineText = candidate.manualBaselineText;
+    lines[index].manuallyEdited = true;
+    lines[index].manualErrorChars = candidate.manualErrorChars;
+    lines[index].manualEditRanges = getManualEditRanges(candidate);
+    if (provider === "bdrc" || provider === "llm") {
+      saveOcrQualityReview({
+        result: existing, compare, pageNum: state.pageNum, blockIndex: index,
+        text: candidate.text, qualitySide: provider,
+        manualErrorChars: candidate.manualErrorChars || 0,
+      });
+    }
+    bdrcChanged ||= provider === "bdrc";
+    llmChanged ||= provider === "llm";
+  });
+  if (bdrcChanged) compare.bdrc.text = joinActiveOcrLines(compare.bdrc.lines);
+  if (llmChanged) compare.llm.text = joinActiveOcrLines(compare.llm.lines);
+  return compare;
 }
 
 function ensureProofreadCompareResult() {
@@ -7903,9 +7956,10 @@ function syncLineEditorsToResult(lines) {
     updatedAt: new Date().toISOString(),
   });
   els.ocrText.value = text;
-  saveCachedResults();
+  const saved = saveCachedResults() !== false;
   updateSummary();
   updateThumbnailState();
+  return saved;
 }
 
 function clearCurrentTranslation() {
