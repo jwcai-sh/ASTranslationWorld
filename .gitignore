@@ -43,6 +43,7 @@ unknown-requests/
 *.doc
 *.docx
 *.png
+!tibetan-proofreading-app/favicon.png
 *.jpg
 *.jpeg
 *.gif
