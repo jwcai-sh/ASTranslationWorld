@@ -168,8 +168,8 @@ class ProviderReviewTests(unittest.TestCase):
 
     def test_gemini_selected_model_reaches_crop_request(self):
         with patch.object(server, 'USE_MODEL_AGGREGATOR', True), patch.object(server, 'prepare_line_review_images', return_value=([b'png'], {})), patch.object(server, 'call_model_aggregator_images', return_value={'text': 'བོད་'}) as request:
-            server.call_line_review_vision(b'', '', {}, '', 'gemini-3.1-flash-lite')
-            self.assertEqual(request.call_args.kwargs['model_override'], 'gemini:gemini-3.1-flash-lite')
+            server.call_line_review_vision(b'', '', {}, '', 'gemini-3.8-flash')
+            self.assertEqual(request.call_args.kwargs['model_override'], 'gemini:gemini-3.8-flash')
             with self.assertRaisesRegex(RuntimeError, '允许列表'):
                 server.call_line_review_vision(b'', '', {}, '', 'qwen3.5-ocr')
 
