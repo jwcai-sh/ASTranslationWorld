@@ -5389,7 +5389,7 @@ function renderProofreadChoiceSelect(index, savedSide, candidateLabel = "Gemini 
   select.name = `proofread-choice-${state.pageNum}-${index}`;
   select.setAttribute("aria-label", `第 ${index + 1} 个 block 采用版本`);
   const choices = [["bdrc", "BDRC"], ["llm", candidateLabel]];
-  if (compare?.qwenReviews?.some((review) => review.index === index)) choices.push(["qwen", "千问候选"]);
+  if (compare?.qwenReviews?.some((review) => review.index === index && review.alignmentStatus !== "pending-review")) choices.push(["qwen", "千问候选"]);
   if (compare?.openaiReviews?.some((review) => review.index === index)) choices.push(["openai", "OpenAI 候选"]);
   choices.forEach(([value, text]) => {
     const option = document.createElement("option");
@@ -5792,6 +5792,12 @@ function updateManualEditTracking(target, nextText, baselineText = target?.manua
   const normalized = normalizeOcrTextSpacing(String(nextText || ""));
   target.manualBaselineText = baseline;
   target.manualErrorChars = levenshteinDistance(
+    if (provider === "qwen" && candidate.alignmentStatus === "pending-review") {
+      const warning = document.createElement("p");
+      warning.setAttribute("role", "status");
+      warning.textContent = "待复核：此千问候选可能错行，旧结果保留，暂不可直接采用。";
+      group.append(warning);
+    }
     tokenizeOcrDiffText(baseline).map((token) => token.value),
     tokenizeOcrDiffText(normalized).map((token) => token.value),
   );
@@ -6072,7 +6078,7 @@ function makeLineCropContext() {
 
 function makeLineCropCacheKey(sourceLine, index, context) {
   return JSON.stringify([context.cacheKey, context.pageNum, index, context.dpi,
-    context.profile, context.endpoint, normalizeBbox(sourceLine.bbox), "row-crop-v25"]);
+    context.profile, context.endpoint, normalizeBbox(sourceLine.bbox), "row-crop-v26"]);
 }
 
 function sameLineCropMetadata(a, b) {
@@ -6111,8 +6117,8 @@ async function getCachedLineCrop(sourceLine, index, metadata, context, blob = nu
   const key = makeLineCropCacheKey(sourceLine, index, context);
   let cached = null;
   try { cached = await accessLineCropCache(key); } catch { /* Preview can still render. */ }
-  const currentInput = metadata?.crop_version === 25;
-  if (cached?.payload?.review_image?.crop_version === 25 && cached?.payload?.images?.length && (!currentInput || sameLineCropMetadata(metadata, cached.payload.review_image))) {
+  const currentInput = metadata?.crop_version === 26;
+  if (cached?.payload?.review_image?.crop_version === 26 && cached?.payload?.images?.length && (!currentInput || sameLineCropMetadata(metadata, cached.payload.review_image))) {
     return cached;
   }
   if (lineCropRequests.has(key)) return lineCropRequests.get(key);
@@ -6127,7 +6133,7 @@ async function getCachedLineCrop(sourceLine, index, metadata, context, blob = nu
     const response = await fetch(endpoint, { method: "POST", body: data });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
-    if (payload.review_image?.crop_version !== 25) throw new Error("裁剪服务尚未更新，请重启本地服务后重试");
+    if (payload.review_image?.crop_version !== 26) throw new Error("裁剪服务尚未更新，请重启本地服务后重试");
     const entry = { payload, savedAt: new Date().toISOString(), context, modelInputs: cached?.modelInputs || {}, ...(cached?.modelInput ? { modelInput: cached.modelInput } : {}) };
     try { await accessLineCropCache(key, entry); }
     catch (error) { entry.cacheError = error.message; }
@@ -7069,6 +7075,10 @@ function makeAiOnlyCompareWithBdrcDiagnostic(result) {
         bbox: null,
         index: 0,
         error: true,
+  if (candidate?.alignmentStatus === "pending-review") {
+    setStatus("千问候选行对应待复核，不能直接采用；原结果保留。", "warn");
+    return false;
+  }
       }],
       error: true,
     },
@@ -8426,8 +8436,57 @@ function syncPageControls(hasDocument = state.pageCount > 0) {
     els.renderMeta.textContent = `/ ${state.pageCount || 0}`;
   }
   if (els.ocrPageTotal) els.ocrPageTotal.textContent = `/ ${state.pageCount || 0}`;
+const sourceAlignmentJobs = new WeakSet();
+async function repairSourceRowBindings(result) {
+  if (!result || !["ai-vision", "proofread"].includes(result.source) || result.sourceAlignmentVersion === 2
+      || sourceAlignmentJobs.has(result) || !getVisibleSourceElement()) return;
+  const compare = getOcrSourceCompare(result);
+  const count = compare?.llm?.lines?.length || 0;
+  if (!count) return;
+  sourceAlignmentJobs.add(result);
+  const page = state.pageNum, key = state.cacheKey;
+  const before = JSON.stringify(result);
+  try {
+    const blob = await getCurrentPageImageBlob();
+    const form = new FormData();
+    form.append("file", blob, "page.png");
+    form.append("line_count", String(count));
+    const endpoint = getAiVisionLineReviewEndpoint().replace(/\/line-review$/, "/layout");
+    const response = await fetch(endpoint, {method: "POST", body: form});
+    if (!response.ok) throw new Error("原文行定位接口不可用");
+    const layout = await response.json();
+    if (state.pageNum !== page || state.cacheKey !== key || state.ocrResults.get(page) !== result
+        || JSON.stringify(result) !== before) { sourceAlignmentJobs.delete(result); return; }
+    if (layout.alignment_version !== 2 || !layout.alignment_matched || layout.lines.length !== count) {
+      setStatus("原文物理行数与识别块数不一致，待人工核对；未自动移动识别或校对内容。", "warn");
+      return;
+    }
+    for (const lines of [result.lines, compare.llm.lines]) {
+      if (!Array.isArray(lines) || lines.length !== count) continue;
+      lines.forEach((line, i) => {
+        line.bbox = layout.lines[i].bbox;
+        line.bboxApproximate = false;
+        line.reviewImage = null;
+        line.sourceRowIndex = i;
+      });
+    }
+    compare.qwenReviews = (compare.qwenReviews || []).map(review => ({...review,
+      alignmentStatus: "pending-review",
+      note: "待复核：原文行映射已修正，旧千问候选可能错行；原文字及人工修改保留。"}));
+    result.compare = compare;
+    result.sourceAlignmentVersion = 2;
+    saveCachedResults();
+    updateOcrPanelForPage();
+    renderSourceBlockOverlay();
+  } catch (error) {
+    setStatus(`原文行对应检查失败：${error.message}；原结果保留。`, "warn");
+    sourceAlignmentJobs.delete(result);
+  }
 }
 
+}
+
+  void repairSourceRowBindings(result);
 function setBusy(isBusy) {
   const wasBusy = state.isOcrBusy;
   state.isOcrBusy = Boolean(isBusy);
