@@ -1895,7 +1895,7 @@ def prepare_qwen_review_context(image_bytes: bytes, bbox: dict[str, float]) -> t
                     "local_size": {"width": local.width, "height": local.height}}
 
 
-def request_qwen_original_page(image_bytes: bytes, filename: str, model: str, prompt: str) -> tuple[str, str]:
+def request_qwen_original_page(image_bytes: bytes, filename: str, model: str, prompt: str, images=None) -> tuple[str, str]:
     if model not in QWEN_REVIEW_MODELS:
         raise RuntimeError("千问复核模型不在允许列表中，请刷新模型列表。")
     if not QWEN_REVIEW_API_KEY or not QWEN_REVIEW_BASE_URL:
@@ -1906,9 +1906,9 @@ def request_qwen_original_page(image_bytes: bytes, filename: str, model: str, pr
     host = upstream.hostname or ""
     if upstream.scheme != "https" or not (host.endswith(".aliyuncs.com") or host.endswith(".qianwenai.com")) or upstream.username or upstream.password or upstream.query or upstream.fragment:
         raise RuntimeError("千问接口必须是官方 HTTPS 地址，且不能在地址中包含凭据。")
-    content = [{"type": "text", "text": prompt},
-               {"type": "image_url", "image_url": {"url": image_data_url(image_bytes, filename)},
-                "max_pixels": 8388608}]
+    content = [{"type": "text", "text": prompt}] + [
+        {"type": "image_url", "image_url": {"url": image_data_url(data, name)}, "max_pixels": 8388608}
+        for data, name in (images or [(image_bytes, filename)])]
     url = QWEN_REVIEW_BASE_URL if QWEN_REVIEW_BASE_URL.endswith("/chat/completions") else QWEN_REVIEW_BASE_URL + "/chat/completions"
     body = {"model": model, "messages": [{"role": "user", "content": content}], "temperature": 0, "max_tokens": MAX_TOKENS}
     if model in {"qwen3.8-max", "qwen3.7-plus"}:
@@ -1916,9 +1916,40 @@ def request_qwen_original_page(image_bytes: bytes, filename: str, model: str, pr
     raw = post_json(url, body, QWEN_REVIEW_API_KEY)
     choices = raw.get("choices") or []
     text = parse_model_text(raw).strip()
-    if not text or not choices or choices[0].get("finish_reason") not in {None, "stop"}:
-        raise RuntimeError("千问未返回完整的单行文字，请检查模型权限或重试。")
+    if not choices or not text:
+        raise RuntimeError("千问返回为空，未采用结果。请重试或检查模型权限。")
+    finish = choices[0].get("finish_reason")
+    if finish not in {None, "stop"}:
+        reason = {"length": "达到输出长度上限", "content_filter": "上游内容过滤", "tool_calls": "返回了工具调用"}.get(finish, "上游未正常结束")
+        raise RuntimeError("千问响应不完整（" + reason + "），未采用结果。请减少核验候选或重试。")
     return text, raw.get("model", model)
+
+
+def request_visual_proofread(provider, model, images, prompt):
+    if provider == "gemini":
+        model = model.removeprefix("gemini:")
+        if model not in GEMINI_REVIEW_MODELS or not USE_MODEL_AGGREGATOR:
+            raise RuntimeError("Gemini 核图模型不可用，请选择已配置模型")
+        # The OCR-to-Markdown route adds an incompatible fixed system prompt.
+        # Structured proofreading uses the existing multimodal chat endpoint.
+        content = [{"type": "text", "text": prompt}] + [
+            {"type": "image_url", "image_url": {"url": image_data_url(data, name)}} for data, name in images]
+        result = post_json(aggregator_url("/api/aggregate/chat"), {
+            "model": f"gemini:{model}", "temperature": 0, "maxTokens": MAX_TOKENS,
+            "messages": [{"role": "system", "content": "你是原图校对助手。只返回请求指定的合法 JSON 对象，不要 Markdown 或额外说明。"},
+                         {"role": "user", "content": content}],
+        }, AGGREGATOR_API_KEY)
+        if not result.get("ok"):
+            raise RuntimeError("Gemini 核图失败：" + redact_sensitive(str(result.get("error") or "无结果")))
+        resolved = str(result.get("modelRef") or result.get("model") or "")
+        if resolved not in {model, f"gemini:{model}"} or result.get("fallbackUsed"):
+            raise RuntimeError("Gemini 核图响应模型不符，未采用结果")
+        if result.get("finishReason") not in {None, "STOP", "stop"}:
+            raise RuntimeError("Gemini 核图输出未完整结束，请重试")
+        return str(result.get("answer") or ""), resolved
+    if provider == "qwen":
+        return request_qwen_original_page(images[0][0], images[0][1], model, prompt, images=images)
+    raise RuntimeError("不支持的核图提供商")
 
 
 def call_qwen_line_review(image_bytes: bytes, filename: str, bbox: dict[str, float], model: str) -> dict[str, Any]:
@@ -2046,7 +2077,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.rstrip("/")
-        if path not in {"/ocr", "/layout", "/line-review", "/openai-line-review", "/openai-page-review", "/gemini-page-review", "/qwen-line-review", "/qwen-page-review", "/line-preview", "/line-layout"}:
+        if path not in {"/proofread-prepare", "/proofread-read", "/proofread-verify", "/ocr", "/layout", "/line-review", "/openai-line-review", "/openai-page-review", "/gemini-page-review", "/qwen-line-review", "/qwen-page-review", "/line-preview", "/line-layout"}:
             self.send_json({"error": "Not found"}, status=404)
             return
 
@@ -2069,6 +2100,40 @@ class Handler(BaseHTTPRequestHandler):
                 raise RuntimeError("uploaded file is empty")
 
             filename = getattr(file_item, "filename", "") or "page.png"
+            if path.startswith("/proofread-"):
+                import visual_proofread
+                if path == "/proofread-prepare":
+                    manual = field_value(form, "manual") == "1"
+                    bbox = parse_normalized_bbox(field_value(form, "bbox"))
+                    detector = detect_physical_text_line_bboxes
+                    if not manual:
+                        # Find all physical rows overlapping the requested block.
+                        # Never use bound_legacy_line_crop: it deliberately picks one row.
+                        regions = detect_traditional_column_bboxes(image_bytes)
+                        center = next((r for r in regions if r.get("id") == "center"), None)
+                        if center and center["x"] <= bbox["x"] + bbox["width"] / 2 <= center["x"] + center["width"]:
+                            region = dict(center)
+                            region["y"] = max(0, center["y"] - center["height"] * .15)
+                            region["height"] = min(1, center["y"] + center["height"] * 1.15) - region["y"]
+                            local = crop_image_to_bbox(image_bytes, region, padding=False)
+                            detected = detect_physical_text_line_bboxes(local)
+                            rows = [{"x": region["x"] + r["x"] * region["width"],
+                                     "y": region["y"] + r["y"] * region["height"],
+                                     "width": r["width"] * region["width"],
+                                     "height": r["height"] * region["height"]} for r in detected]
+                            bbox, selected_rows = visual_proofread.expand_region(bbox, rows)
+                            if selected_rows:
+                                detector = lambda _image: selected_rows
+                    payload = visual_proofread.prepare(image_bytes, bbox, detector, manual=manual)
+                else:
+                    context_bytes = form["context"].file.read() if "context" in form else None
+                    payload = visual_proofread.review(image_bytes, context_bytes,
+                        field_value(form, "provider"), field_value(form, "model"),
+                        "read" if path == "/proofread-read" else "verify",
+                        json.loads(field_value(form, "candidates") or "[]"), request_visual_proofread)
+                self.send_json(payload)
+                return
+
             if path == "/layout":
                 line_count = field_value(form, "line_count")
                 ocr_profile = field_value(form, "ocr_profile")

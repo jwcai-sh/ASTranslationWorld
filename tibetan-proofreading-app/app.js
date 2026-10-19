@@ -1,8 +1,8 @@
 const SAMPLE_PDF_URL = "../藏文/天文历算学-本科教材 藏文40301698_部分.pdf";
 const PDF_WORKER_URL = "./vendor/pdf.worker.min.js";
-const APP_BUILD_ID = "20261011-center-page-models";
+const APP_BUILD_ID = "20261018-line-vision-proofread";
 let pageReviewPending = false;
-const REVIEW_MODEL_DEFAULTS = { qwen: ["qwen3.8-max", "qwen3.7-plus"], gemini: ["gemini-3.8-flash", "gemini-3.1-flash-lite"] };
+const REVIEW_MODEL_DEFAULTS = { qwen: ["qwen3.8-max", "qwen3.7-plus"], gemini: ["gemini-3.1-flash-lite", "gemini-3.8-flash"] };
 const reviewCatalogRequests = new Map();
 const SOURCE_LAYOUT_VERSION = 4;
 window.__TIBETAN_PROOFREADING_APP_BUILD_ID__ = APP_BUILD_ID;
@@ -2858,51 +2858,53 @@ async function renderCurrentPage() {
   }
 
   const token = ++state.renderToken;
-  if (await renderCurrentPdfPageWithLocalService(token)) {
+  try {
+    const page = await state.pdfDoc.getPage(state.pageNum);
+    if (token !== state.renderToken) return;
+
+    const baseViewport = page.getViewport({ scale: 1 });
+    const requestedZoom = els.zoomInput.value;
+    const availableWidth = Math.max(320, els.pageViewport.clientWidth - 40);
+    const scale = requestedZoom === "fit"
+      ? Math.min(availableWidth / baseViewport.width, 2.2)
+      : Number(requestedZoom);
+
+    const viewport = page.getViewport({ scale });
+    const dpr = window.devicePixelRatio || 1;
+    const canvas = els.pdfCanvas;
+    const context = canvas.getContext("2d", { alpha: false });
+
+    canvas.width = Math.floor(viewport.width * dpr);
+    canvas.height = Math.floor(viewport.height * dpr);
+    canvas.style.width = `${Math.floor(viewport.width)}px`;
+    canvas.style.height = `${Math.floor(viewport.height)}px`;
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, viewport.width, viewport.height);
+
+    await page.render({ canvasContext: context, viewport }).promise;
+    if (token !== state.renderToken) return;
+
+    els.pdfCanvas.style.display = "block";
+    els.imagePage.style.display = "none";
+    els.emptyState.style.display = "none";
     syncPageControls(true);
     renderActiveSourceHighlight();
     updateOcrPanelForPage();
     updateTranslationPanelForPage();
     updateThumbnailState();
     deferCurrentPageSourceHydration(state.pageNum, token);
-    return;
+  } catch (error) {
+    if (token !== state.renderToken) return;
+    console.warn("Browser PDF render unavailable, falling back to server", error);
+    if (!await renderCurrentPdfPageWithLocalService(token)) throw error;
+    syncPageControls(true);
+    renderActiveSourceHighlight();
+    updateOcrPanelForPage();
+    updateTranslationPanelForPage();
+    updateThumbnailState();
+    deferCurrentPageSourceHydration(state.pageNum, token);
   }
-
-  const page = await state.pdfDoc.getPage(state.pageNum);
-  if (token !== state.renderToken) return;
-
-  const baseViewport = page.getViewport({ scale: 1 });
-  const requestedZoom = els.zoomInput.value;
-  const availableWidth = Math.max(320, els.pageViewport.clientWidth - 40);
-  const scale = requestedZoom === "fit"
-    ? Math.min(availableWidth / baseViewport.width, 2.2)
-    : Number(requestedZoom);
-
-  const viewport = page.getViewport({ scale });
-  const dpr = window.devicePixelRatio || 1;
-  const canvas = els.pdfCanvas;
-  const context = canvas.getContext("2d", { alpha: false });
-
-  canvas.width = Math.floor(viewport.width * dpr);
-  canvas.height = Math.floor(viewport.height * dpr);
-  canvas.style.width = `${Math.floor(viewport.width)}px`;
-  canvas.style.height = `${Math.floor(viewport.height)}px`;
-  context.setTransform(dpr, 0, 0, dpr, 0, 0);
-  context.fillStyle = "#fff";
-  context.fillRect(0, 0, viewport.width, viewport.height);
-
-  await page.render({ canvasContext: context, viewport }).promise;
-  if (token !== state.renderToken) return;
-
-  els.pdfCanvas.style.display = "block";
-  els.imagePage.style.display = "none";
-  els.emptyState.style.display = "none";
-  syncPageControls(true);
-  renderActiveSourceHighlight();
-  updateOcrPanelForPage();
-  updateTranslationPanelForPage();
-  updateThumbnailState();
-  deferCurrentPageSourceHydration(state.pageNum, token);
 }
 
 function deferCurrentPageSourceHydration(pageNum, renderToken = state.renderToken) {
@@ -4862,6 +4864,52 @@ async function getCurrentPageImageBlob() {
   });
 }
 
+async function getSourcePreviewPageBlob(pageNum) {
+  if (state.sourceType === "image") return state.imageBlob;
+  const pdfDoc = state.pdfDoc;
+  if (!pdfDoc) return getCurrentPageImageBlob();
+
+  const page = await pdfDoc.getPage(pageNum);
+  const baseViewport = page.getViewport({ scale: 1 });
+  const dpi = getBatchPdfRenderDpi(
+    baseViewport.width, baseViewport.height, Number(els.dpiInput.value) || 260,
+  );
+  const cacheKey = `source-preview-client:${makePdfPageRenderCacheKey(pageNum, dpi)}`;
+  const cached = state.pdfPageRenderCache.get(cacheKey);
+  if (cached?.blob) return cached.blob;
+  if (cached?.pending) return cached.pending;
+
+  const pending = (async () => {
+    try {
+      const viewport = page.getViewport({ scale: dpi / 72 });
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.floor(viewport.width);
+      canvas.height = Math.floor(viewport.height);
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) throw new Error("无法创建预览画布");
+      context.fillStyle = "#fff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: context, viewport }).promise;
+      return await new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("无法生成预览页图")), "image/jpeg", 0.92);
+      });
+    } catch (error) {
+      if (state.pdfDoc !== pdfDoc) throw error;
+      console.warn("Browser source preview render unavailable, falling back to server", error);
+      return getRenderedPdfPageBlobWithCache(pageNum, dpi);
+    }
+  })();
+  state.pdfPageRenderCache.set(cacheKey, { pending, url: "" });
+  try {
+    const blob = await pending;
+    if (state.pdfDoc === pdfDoc) state.pdfPageRenderCache.set(cacheKey, { blob, url: "" });
+    return blob;
+  } catch (error) {
+    state.pdfPageRenderCache.delete(cacheKey);
+    throw error;
+  }
+}
+
 async function downloadCurrentPageImage() {
   if (!state.pageCount) {
     setStatus("请先上传 PDF 或图片。", "warn");
@@ -5348,12 +5396,193 @@ function renderProofreadBlockCard({ index, bdrcLine, aiLine, finalLine, sourceLi
   });
 
   const sourcePanel = renderProofreadSourcePanel(sourceLine, index);
-  card.append(sourcePanel, stack, options);
+  card.append(sourcePanel, renderLineVisionProofread(index, sourceLine), stack, options);
+  card.addEventListener("input", (event) => {
+    if (!event.target.closest(".proofread-editor, .openai-review-candidate")) return;
+    const review = card.querySelector(".line-vision-proofread");
+    if (review?.invalidate) { review.invalidate(); return; }
+    review?.querySelector(".line-vision-results")?.remove();
+    if (review) review.dataset.reviewState = "idle";
+    const feedback = review?.querySelector(".line-vision-feedback");
+    if (feedback) feedback.textContent = "模型文字已修改，请重新进行视觉逐字核对。";
+  });
   if (state.isOcrBusy && state.ocrResults.get(state.pageNum)?.raw?.line_ocr) {
     card.querySelectorAll("button:not(.source-preview-scale-button), select").forEach((control) => { control.disabled = true; });
     card.querySelectorAll('[contenteditable="true"]').forEach((editor) => { editor.contentEditable = "false"; });
   }
   return card;
+}
+
+function getLineVisionCandidates(index) {
+  const result = state.ocrResults.get(state.pageNum);
+  const compare = getOcrSourceCompare(result);
+  if (!compare) return [];
+  const candidates = [
+    ["BDRC", compare.bdrc?.lines?.[index]],
+    ["Gemini Vision", compare.llm?.lines?.[index]],
+    ["千问", compare.qwenReviews?.find((row) => row.index === index && row.alignmentStatus !== "pending-review")],
+    ["OpenAI", compare.openaiReviews?.find((row) => row.index === index)],
+  ];
+  return candidates.filter(([, row]) => row && !row.deleted && !isDiagnosticOcrLine(row) && String(row.text || "").trim())
+    .map(([label, row]) => ({ label, text: String(row.text) }));
+}
+
+async function requestLineVisionReading(endpoint, crop, model) {
+  const data = new FormData();
+  data.append("file", crop, "proofread-line.png");
+  data.append("bbox", JSON.stringify({ x: 0, y: 0, width: 1, height: 1 }));
+  data.append("model", model);
+  let response;
+  try {
+    response = await fetch(endpoint, { method: "POST", body: data, signal: AbortSignal.timeout(120000) });
+  } catch (error) {
+    if (error?.name === "TimeoutError") throw new Error("视觉模型两分钟内未返回，请稍后重试");
+    throw error;
+  }
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || payload.detail || `HTTP ${response.status}`);
+  if (payload.line_review !== true || payload.recognition_scope !== "whole-page") {
+    throw new Error("视觉服务未返回单行图像转录");
+  }
+  return validateIndependentReviewText(payload.text);
+}
+
+async function makeLineVisionModelCrop(dataUrl) {
+  const image = await new Promise((resolve, reject) => {
+    const source = new Image();
+    source.onload = () => resolve(source);
+    source.onerror = () => reject(new Error("无法读取逐行裁图"));
+    source.src = dataUrl;
+  });
+  if (image.naturalWidth <= 2000) return (await fetch(dataUrl)).blob();
+  const canvas = document.createElement("canvas");
+  canvas.width = 2000;
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * canvas.width / image.naturalWidth));
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("无法准备视觉模型用行图");
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return new Promise((resolve, reject) => canvas.toBlob(
+    (blob) => blob ? resolve(blob) : reject(new Error("无法导出视觉模型用行图")), "image/png",
+  ));
+}
+
+function appendLineVisionEvidence(container, imageDataUrl, gemini, qwen, sourceLine, index) {
+  const figure = document.createElement("figure");
+  figure.className = "line-vision-source";
+  const caption = document.createElement("figcaption");
+  caption.textContent = "本次核对的原图行裁图 · 点击图片定位左栏原页";
+  const scroll = document.createElement("div");
+  scroll.className = "line-vision-source-scroll";
+  const image = document.createElement("img");
+  image.src = imageDataUrl;
+  image.alt = `第 ${index + 1} 个 block 的原图行裁图`;
+  image.addEventListener("click", (event) => {
+    event.stopPropagation();
+    activateOcrSourceBlock(sourceLine, index);
+  });
+  scroll.appendChild(image);
+  figure.append(caption, scroll);
+  container.appendChild(figure);
+  for (const [label, reading] of [["Gemini 读图", gemini], ["千问读图", qwen]]) {
+    const row = document.createElement("div");
+    row.className = "line-vision-reading";
+    const heading = document.createElement("strong");
+    heading.textContent = `${label}：`;
+    const text = document.createElement("span");
+    text.className = "tibetan-text";
+    text.textContent = reading;
+    row.append(heading, text);
+    container.appendChild(row);
+  }
+}
+
+function appendLineVisionCandidate(container, candidate, assessment, sourceLine, index) {
+  const row = document.createElement("div");
+  row.className = "line-vision-candidate";
+  const label = document.createElement("strong");
+  label.textContent = `${candidate.label}：`;
+  const text = document.createElement("span");
+  text.className = "tibetan-text";
+  let cursor = 0;
+  for (const mark of assessment.marks) {
+    text.appendChild(document.createTextNode(candidate.text.slice(cursor, mark.start)));
+    const target = document.createElement("button");
+    target.type = "button";
+    target.className = "line-vision-confirmed-mark";
+    target.textContent = candidate.text.slice(mark.start, mark.end);
+    target.title = `双模型看图均读为「${mark.suggestion}」；点击定位此行原图，仍需人工确认`;
+    target.setAttribute("aria-label", `${candidate.label} 的「${mark.original}」疑错，视觉模型均读为「${mark.suggestion}」，查看原文行`);
+    target.addEventListener("click", (event) => {
+      event.stopPropagation();
+      activateOcrSourceBlock(sourceLine, index);
+    });
+    text.appendChild(target);
+    cursor = mark.end;
+  }
+  text.appendChild(document.createTextNode(candidate.text.slice(cursor)));
+  const verdict = document.createElement("small");
+  verdict.className = "line-vision-verdict";
+  verdict.dataset.status = assessment.status;
+  verdict.textContent = assessment.status === "match"
+    ? "两次读图与此候选一致"
+    : assessment.status === "confirmed"
+      ? `双模型核图定位 ${assessment.marks.length} 处疑错${assessment.unresolved ? "；另有差异未能可靠定位，需人工核图" : ""}`
+      : assessment.status === "unresolved"
+        ? "与两次原图读字有差异，但未能可靠定位；请人工核图"
+        : "两次读图不一致，暂不能判断；请人工核图";
+  row.append(label, text, verdict);
+  container.appendChild(row);
+}
+
+function renderLineVisionProofread(index, sourceLine) {
+  const pageNum = state.pageNum, cacheKey = state.cacheKey;
+  const context = makeLineCropContext();
+  const getCandidates = () => {
+    const compare = getOcrSourceCompare(state.ocrResults.get(pageNum));
+    return [
+      ["bdrc", "BDRC", compare?.bdrc?.lines?.[index]],
+      ["llm", "Gemini Vision", compare?.llm?.lines?.[index]],
+      ["qwen", "千问", compare?.qwenReviews?.find(row => row.index === index && row.alignmentStatus !== "pending-review")],
+      ["openai", "OpenAI", compare?.openaiReviews?.find(row => row.index === index)],
+    ].filter(([, , row]) => row && !row.deleted && !isDiagnosticOcrLine(row) && String(row.text || "").trim())
+      .map(([id, label, row]) => ({id, label, text: String(row.text), model: row.model || "", source: "api"}));
+  };
+  const panel = window.VisualProofreadPanel.create({
+    contextKey: JSON.stringify([cacheKey, pageNum, index, context.dpi, normalizeBbox(sourceLine?.bbox)]),
+    bbox: sourceLine?.estimated ? null : normalizeBbox(sourceLine?.bbox),
+    endpoint: context.endpoint,
+    models: REVIEW_MODEL_DEFAULTS,
+    isCurrent: () => state.pageNum === pageNum && state.cacheKey === cacheKey && makeLineCropContext().dpi === context.dpi && !state.batchOcr?.running,
+    getCandidates,
+    getImage: () => getCurrentPageImageBlob(),
+    onLocate: (bbox) => activateOcrSourceBlock({...sourceLine, bbox, estimated: false}, index),
+    onEdit: (candidateId) => {
+      const card = panel.closest('.proofread-block-card');
+      const selector = candidateId === 'bdrc' ? '.is-bdrc .proofread-editor'
+        : candidateId === 'llm' ? '.is-ai .proofread-editor'
+        : `[data-review-provider="${candidateId}"]`;
+      const editor = card?.querySelector(selector);
+      editor?.scrollIntoView({block: 'center', behavior: 'smooth'});
+      editor?.focus();
+    },
+    onApply: (candidate, value) => {
+      if (state.pageNum !== pageNum || state.cacheKey !== cacheKey) throw new Error("页面已改变");
+      if (["qwen", "openai"].includes(candidate.id)) {
+        if (!updateIndependentReviewText(candidate.id, index, value)) throw new Error("候选修改未能保存，请检查原候选");
+      } else {
+        updateProofreadCompareLine(candidate.id, index, value, null, sourceLine);
+        if (saveCachedResults() === false) throw new Error("候选修改未能保存，请检查原候选");
+      }
+      const card = panel.closest(".proofread-block-card");
+      const editor = card?.querySelector(candidate.id === "bdrc" ? ".is-bdrc .proofread-editor"
+        : candidate.id === "llm" ? ".is-ai .proofread-editor" : `[data-review-provider="${candidate.id}"]`);
+      if (editor) editor.textContent = value;
+      updateProofreadSummaryAfterEdit();
+    },
+  });
+  return panel;
 }
 
 function makeProofreadAiLine(compare, rawAiLine, index, fallbackBbox = null) {
@@ -5459,9 +5688,8 @@ function decorateProofreadModelSection(group, index, provider, card) {
   const header = group.querySelector(".proofread-editor-label");
   const content = group.querySelector(".proofread-editor-body");
   content.classList.add("proofread-model-content");
-  const controls = header.querySelector(".review-provider-controls");
   const actions = renderSharedErrorActionGroup(index, card, provider);
-  appendProofreadErrorActionsAfterModelSelector(controls, actions, controls ? null : header);
+  appendProofreadErrorActionsAfterModelSelector(null, actions, header);
   header.append(makeProofreadModelToggle(index, provider, content));
   group.classList.add("proofread-model-section");
   return group;
@@ -5472,12 +5700,12 @@ function decorateIndependentProofreadModelSection(group, index, provider, card) 
   header.className = "proofread-editor-label proofread-independent-label";
   const title = document.createElement("strong");
   title.textContent = `${proofreadModelName(provider)} block ${String(index + 1).padStart(2, "0")} 识别`;
-  const controls = group.querySelector(".review-provider-controls");
   const content = document.createElement("div");
   content.className = "proofread-model-content proofread-independent-content";
   while (group.firstChild) content.appendChild(group.firstChild);
-  appendProofreadErrorActionsAfterModelSelector(controls, renderSharedErrorActionGroup(index, card, provider));
-  header.append(title, controls, makeProofreadModelToggle(index, provider, content));
+  header.append(title);
+  appendProofreadErrorActionsAfterModelSelector(null, renderSharedErrorActionGroup(index, card, provider), header);
+  header.append(makeProofreadModelToggle(index, provider, content));
   group.classList.add("proofread-model-section", `is-${provider}`);
   group.replaceChildren(header, content);
   return group;
@@ -5488,8 +5716,15 @@ function renderReviewModelSelector(provider, index, onCatalog = null) {
   select.className = "review-model-select";
   select.setAttribute("aria-label", `第 ${index + 1} 行 ${provider === "qwen" ? "千问" : "Gemini Vision"}复核模型`);
   const preferenceKey = `tibetan-proofreading-app:review-model:${provider}:${state.cacheKey}:${state.pageNum}:${index}`;
+  const defaultMigrationKey = `${preferenceKey}:gemini-default-3.1`;
   let preferred = "";
-  try { preferred = window.localStorage.getItem(preferenceKey) || ""; } catch (_) { /* storage optional */ }
+  try {
+    preferred = window.localStorage.getItem(preferenceKey) || "";
+    if (provider === "gemini" && preferred === "gemini-3.8-flash" && !window.localStorage.getItem(defaultMigrationKey)) {
+      preferred = "";
+      window.localStorage.setItem(defaultMigrationKey, "1");
+    }
+  } catch (_) { /* storage optional */ }
   const fill = (availableModels) => {
     const models = provider === "qwen"
       ? availableModels.filter((model) => model !== "qwen3.5-ocr")
@@ -5562,7 +5797,12 @@ function renderAiVisionLineReviewButton(index, card, sourceLine, bdrcLine, aiLin
   feedback.className = "review-feedback";
   feedback.setAttribute("role", "status");
   controls.append(button, select);
-  group.append(controls, feedback);
+  const optionalReview = document.createElement('details');
+  optionalReview.className = 'optional-model-review';
+  const optionalTitle = document.createElement('summary');
+  optionalTitle.textContent = '重新识别（可选）';
+  optionalReview.append(optionalTitle, controls, feedback);
+  group.append(optionalReview);
   return group;
 }
 
@@ -5596,9 +5836,20 @@ function renderIndependentLineReview(provider, index, sourceLine, bdrcLine, aiLi
     if (!catalog?.configured && !button.disabled) feedback.textContent = "当前 AI OCR 服务未读取到千问 API key 或接口地址，请检查服务状态与本地配置。";
   }) : null;
   if (select) controls.append(select);
-  group.append(controls, feedback);
+  const optionalReview = document.createElement('details');
+  optionalReview.className = 'optional-model-review';
+  const optionalTitle = document.createElement('summary');
+  optionalTitle.textContent = `${label} 重新识别（可选）`;
+  optionalReview.append(optionalTitle, controls, feedback);
+  group.append(optionalReview);
   const candidate = getOcrSourceCompare(state.ocrResults.get(state.pageNum))?.[reviewKey]?.find((review) => review.index === index);
   if (candidate) {
+    if (provider === "qwen" && candidate.alignmentStatus === "pending-review") {
+      const warning = document.createElement("p");
+      warning.setAttribute("role", "status");
+      warning.textContent = "待复核：此千问候选可能错行，旧结果保留，暂不可直接采用。";
+      group.append(warning);
+    }
     const text = document.createElement("div");
     text.className = "tibetan-text openai-review-candidate";
     text.contentEditable = "true";
@@ -5794,12 +6045,6 @@ function updateManualEditTracking(target, nextText, baselineText = target?.manua
   const normalized = normalizeOcrTextSpacing(String(nextText || ""));
   target.manualBaselineText = baseline;
   target.manualErrorChars = levenshteinDistance(
-    if (provider === "qwen" && candidate.alignmentStatus === "pending-review") {
-      const warning = document.createElement("p");
-      warning.setAttribute("role", "status");
-      warning.textContent = "待复核：此千问候选可能错行，旧结果保留，暂不可直接采用。";
-      group.append(warning);
-    }
     tokenizeOcrDiffText(baseline).map((token) => token.value),
     tokenizeOcrDiffText(normalized).map((token) => token.value),
   );
@@ -6072,6 +6317,26 @@ function renderSourcePreviewScaleButton(action, icon, label) {
 
 const lineCropRequests = new Map();
 const lineCropModelWrites = new Map();
+const linePreviewQueue = [];
+let activeLinePreviews = 0;
+
+function queueLinePreview(task) {
+  linePreviewQueue.push(task);
+  drainLinePreviewQueue();
+}
+
+function drainLinePreviewQueue() {
+  while (activeLinePreviews < 2 && linePreviewQueue.length) {
+    const next = linePreviewQueue.shift();
+    activeLinePreviews += 1;
+    Promise.resolve().then(next).catch((error) => {
+      console.warn("Failed to prepare line preview", error);
+    }).finally(() => {
+      activeLinePreviews -= 1;
+      drainLinePreviewQueue();
+    });
+  }
+}
 
 function makeLineCropContext() {
   return { cacheKey: state.cacheKey, pageNum: state.pageNum,
@@ -6139,6 +6404,37 @@ async function getCachedLineCrop(sourceLine, index, metadata, context, blob = nu
     const entry = { payload, savedAt: new Date().toISOString(), context, modelInputs: cached?.modelInputs || {}, ...(cached?.modelInput ? { modelInput: cached.modelInput } : {}) };
     try { await accessLineCropCache(key, entry); }
     catch (error) { entry.cacheError = error.message; }
+    return entry;
+  })();
+  lineCropRequests.set(key, pending);
+  try { return await pending; } finally { lineCropRequests.delete(key); }
+}
+
+// Preview crops use their own cache, so refreshing a preview cannot replace a
+// saved image that a model actually received.
+async function getSourceLinePreviewCrop(sourceLine, index, context) {
+  const key = JSON.stringify([context.cacheKey, context.pageNum, index, context.dpi,
+    context.profile, context.endpoint, normalizeBbox(sourceLine.bbox), "source-preview-fast-v1"]);
+  let cached = null;
+  try { cached = await accessLineCropCache(key); } catch { /* Render without a persistent cache. */ }
+  if (cached?.payload?.review_image?.crop_version === 26 && cached.payload.images?.length) return cached;
+  if (lineCropRequests.has(key)) return lineCropRequests.get(key);
+  const pending = (async () => {
+    if (state.cacheKey !== context.cacheKey || state.pageNum !== context.pageNum) throw new Error("页面已切换");
+    const image = await getSourcePreviewPageBlob(context.pageNum);
+    if (state.cacheKey !== context.cacheKey || state.pageNum !== context.pageNum) throw new Error("页面已切换");
+    const data = new FormData();
+    data.append("file", image, image.type === "image/jpeg" ? "source-preview.jpg" : makePageImageName());
+    data.append("bbox", JSON.stringify(sourceLine.bbox));
+    const endpoint = context.endpoint.replace(/line-review$/, "line-preview");
+    const response = await fetch(endpoint, { method: "POST", body: data });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || payload.detail || `HTTP ${response.status}`);
+    if (payload.review_image?.crop_version !== 26 || !payload.images?.length) {
+      throw new Error("单行原文裁剪格式无效");
+    }
+    const entry = { payload, savedAt: new Date().toISOString(), context, purpose: "source-preview" };
+    try { await accessLineCropCache(key, entry); } catch { /* Preview remains available in memory. */ }
     return entry;
   })();
   lineCropRequests.set(key, pending);
@@ -6223,22 +6519,16 @@ function createModelInputPreview(sourceLine, index) {
   const sourceKey = state.cacheKey;
   const load = async () => {
     try {
-      if (pageNum !== state.pageNum || sourceKey !== state.cacheKey) return;
+      if (!wrapper.isConnected || pageNum !== state.pageNum || sourceKey !== state.cacheKey) return;
       const result = state.ocrResults.get(pageNum);
       const compare = getOcrSourceCompare(result);
-      const metadata = compare?.llm?.lines?.[index]?.reviewImage || sourceLine.reviewImage;
-      const entry = await getCachedLineCrop(sourceLine, index, metadata, makeLineCropContext());
+      const entry = await getSourceLinePreviewCrop(sourceLine, index, makeLineCropContext());
       const payload = entry.payload;
       const previewImages = await composeLinePreviewImages(payload);
       if (!wrapper.isConnected || pageNum !== state.pageNum || sourceKey !== state.cacheKey) return;
       wrapper.replaceChildren();
       const note = document.createElement("small");
-      const recognizedLine = compare?.llm?.lines?.[index];
-      const usedByModel = sameLineCropMetadata(entry.modelInput?.reviewImage, payload.review_image) || (recognizedLine && !recognizedLine.error && !recognizedLine.missing
-        && !isDiagnosticOcrLine(recognizedLine) && sameLineCropMetadata(metadata, payload.review_image));
-      note.textContent = usedByModel
-        ? "已缓存 · 模型输入单行裁剪（按左→右排列）"
-        : "已缓存 · 单行裁剪仅供人工对照；模型识别使用整页原图";
+      note.textContent = "已缓存 · 单行原文裁剪，仅供人工对照；模型输入以已保存记录为准";
       if (compare?.qwen?.some((review) => review.index === index && review.reviewContext)) {
         note.textContent += "；千问还使用整页定位图和宽边界局部图";
       }
@@ -6277,10 +6567,19 @@ function createModelInputPreview(sourceLine, index) {
         mergeDuplicateSourcePreviews(wrapper.closest("#ocrLineCompare"));
       }
     } catch (error) {
-      wrapper.textContent = `裁剪预览失败：${error.message}`;
+      if (wrapper.isConnected) wrapper.textContent = `裁剪预览失败：${error.message}`;
     }
   };
-  window.setTimeout(() => { if (wrapper.isConnected) void load(); }, 0);
+  if ("IntersectionObserver" in window) {
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      observer.disconnect();
+      queueLinePreview(load);
+    }, { rootMargin: "240px 0px" });
+    observer.observe(wrapper);
+  } else {
+    window.setTimeout(() => queueLinePreview(load), 0);
+  }
   return wrapper;
 }
 
@@ -6869,8 +7168,20 @@ async function reviewOcrLineWithAiVision(index, card, sourceLine, bdrcLine, aiLi
     const blob = await getCurrentPageImageBlob();
     await runTraditionalGeminiLines(endpoint, blob, button?.dataset.reviewModel || "");
   } catch (error) {
-    if (feedback) feedback.textContent = `Gemini 整页复核失败：${error.message || error}`;
-    setStatus(`Gemini 整页复核失败：${error.message || error}`, "error");
+    const message = String(error.message || error);
+    const select = card?.querySelector(".review-model-select");
+    const timedOut = /timed out|timeout|超时/i.test(message);
+    const switchModel = timedOut && button?.dataset.reviewModel === "gemini-3.8-flash" && select;
+    if (switchModel) {
+      select.value = "gemini-3.1-flash-lite";
+      if (select.value) select.dispatchEvent(new Event("change"));
+      button.dataset.reviewModel = select.value || button.dataset.reviewModel;
+    }
+    const detail = switchModel && select.value === "gemini-3.1-flash-lite"
+      ? "gemini-3.8-flash 请求超时；已切换到 gemini-3.1-flash-lite，请点击重试。原有结果未改变。"
+      : `Gemini 整页复核失败：${message}`;
+    if (feedback) feedback.textContent = detail;
+    setStatus(detail, "error");
   } finally {
     if (button?.isConnected) button.disabled = false;
   }
@@ -6882,6 +7193,10 @@ function saveProofreadBlockChoice(index, side, card) {
   const candidateProvider = side === "qwen" || side === "openai" ? side : "";
   const candidate = candidateProvider
     ? compare[`${candidateProvider}Reviews`]?.find((review) => review.index === index) : null;
+  if (candidate?.alignmentStatus === "pending-review") {
+    setStatus("千问候选行对应待复核，不能直接采用；原结果保留。", "warn");
+    return false;
+  }
   if (candidateProvider && !candidate) {
     setStatus(`当前 block 没有可采用的${selectedProviderLabel}候选。`, "warn");
     return false;
@@ -7077,10 +7392,6 @@ function makeAiOnlyCompareWithBdrcDiagnostic(result) {
         bbox: null,
         index: 0,
         error: true,
-  if (candidate?.alignmentStatus === "pending-review") {
-    setStatus("千问候选行对应待复核，不能直接采用；原结果保留。", "warn");
-    return false;
-  }
       }],
       error: true,
     },
@@ -8243,8 +8554,58 @@ function downloadBlob(blob, fileName) {
   URL.revokeObjectURL(url);
 }
 
+const sourceAlignmentJobs = new WeakSet();
+async function repairSourceRowBindings(result) {
+  if (!result || !["ai-vision", "proofread"].includes(result.source) || result.sourceAlignmentVersion === 2
+      || sourceAlignmentJobs.has(result) || !getVisibleSourceElement()) return;
+  const compare = getOcrSourceCompare(result);
+  const count = compare?.llm?.lines?.length || 0;
+  if (!count) return;
+  sourceAlignmentJobs.add(result);
+  const page = state.pageNum;
+  try {
+    const blob = await getCurrentPageImageBlob();
+    const form = new FormData();
+    form.append("file", blob, "page.png");
+    form.append("line_count", String(count));
+    const endpoint = getAiVisionLineReviewEndpoint().replace(/\/line-review$/, "/layout");
+    const response = await fetch(endpoint, {method: "POST", body: form});
+    if (!response.ok) throw new Error("原文行定位接口不可用");
+    const layout = await response.json();
+    if (state.pageNum !== page || state.ocrResults.get(page) !== result) { sourceAlignmentJobs.delete(result); return; }
+    const latestCompare = getOcrSourceCompare(result);
+    const layoutBboxes = layout.layout_bboxes;
+    if (layout.alignment_version !== 2 || !layout.alignment_matched || !Array.isArray(layoutBboxes)
+        || layoutBboxes.length !== count || latestCompare?.llm?.lines?.length !== count) {
+      setStatus("原文物理行数与识别块数不一致，待人工核对；未自动移动识别或校对内容。", "warn");
+      return;
+    }
+    for (const lines of [result.lines, latestCompare.llm.lines]) {
+      if (!Array.isArray(lines) || lines.length !== count) continue;
+      lines.forEach((line, i) => {
+        line.bbox = layoutBboxes[i];
+        line.bboxApproximate = false;
+        line.reviewImage = null;
+        line.sourceRowIndex = i;
+      });
+    }
+    latestCompare.qwenReviews = (latestCompare.qwenReviews || []).map(review => ({...review,
+      alignmentStatus: "pending-review",
+      note: "待复核：原文行映射已修正，旧千问候选可能错行；原文字及人工修改保留。"}));
+    result.compare = latestCompare;
+    result.sourceAlignmentVersion = 2;
+    saveCachedResults();
+    updateOcrPanelForPage();
+    renderSourceBlockOverlay();
+  } catch (error) {
+    setStatus(`原文行对应检查失败：${error.message}；原结果保留。`, "warn");
+    sourceAlignmentJobs.delete(result);
+  }
+}
+
 function updateOcrPanelForPage() {
   const result = state.ocrResults.get(state.pageNum);
+  void repairSourceRowBindings(result);
   const sourceLabel = getResultSourceLabel(result);
   const profile = OCR_PROFILES[result?.ocrProfile] || getSelectedOcrProfile();
   const sourceCompare = getAiOnlyDisplayCompare(getOcrSourceCompare(result));
@@ -8438,57 +8799,8 @@ function syncPageControls(hasDocument = state.pageCount > 0) {
     els.renderMeta.textContent = `/ ${state.pageCount || 0}`;
   }
   if (els.ocrPageTotal) els.ocrPageTotal.textContent = `/ ${state.pageCount || 0}`;
-const sourceAlignmentJobs = new WeakSet();
-async function repairSourceRowBindings(result) {
-  if (!result || !["ai-vision", "proofread"].includes(result.source) || result.sourceAlignmentVersion === 2
-      || sourceAlignmentJobs.has(result) || !getVisibleSourceElement()) return;
-  const compare = getOcrSourceCompare(result);
-  const count = compare?.llm?.lines?.length || 0;
-  if (!count) return;
-  sourceAlignmentJobs.add(result);
-  const page = state.pageNum, key = state.cacheKey;
-  const before = JSON.stringify(result);
-  try {
-    const blob = await getCurrentPageImageBlob();
-    const form = new FormData();
-    form.append("file", blob, "page.png");
-    form.append("line_count", String(count));
-    const endpoint = getAiVisionLineReviewEndpoint().replace(/\/line-review$/, "/layout");
-    const response = await fetch(endpoint, {method: "POST", body: form});
-    if (!response.ok) throw new Error("原文行定位接口不可用");
-    const layout = await response.json();
-    if (state.pageNum !== page || state.cacheKey !== key || state.ocrResults.get(page) !== result
-        || JSON.stringify(result) !== before) { sourceAlignmentJobs.delete(result); return; }
-    if (layout.alignment_version !== 2 || !layout.alignment_matched || layout.lines.length !== count) {
-      setStatus("原文物理行数与识别块数不一致，待人工核对；未自动移动识别或校对内容。", "warn");
-      return;
-    }
-    for (const lines of [result.lines, compare.llm.lines]) {
-      if (!Array.isArray(lines) || lines.length !== count) continue;
-      lines.forEach((line, i) => {
-        line.bbox = layout.lines[i].bbox;
-        line.bboxApproximate = false;
-        line.reviewImage = null;
-        line.sourceRowIndex = i;
-      });
-    }
-    compare.qwenReviews = (compare.qwenReviews || []).map(review => ({...review,
-      alignmentStatus: "pending-review",
-      note: "待复核：原文行映射已修正，旧千问候选可能错行；原文字及人工修改保留。"}));
-    result.compare = compare;
-    result.sourceAlignmentVersion = 2;
-    saveCachedResults();
-    updateOcrPanelForPage();
-    renderSourceBlockOverlay();
-  } catch (error) {
-    setStatus(`原文行对应检查失败：${error.message}；原结果保留。`, "warn");
-    sourceAlignmentJobs.delete(result);
-  }
 }
 
-}
-
-  void repairSourceRowBindings(result);
 function setBusy(isBusy) {
   const wasBusy = state.isOcrBusy;
   state.isOcrBusy = Boolean(isBusy);
