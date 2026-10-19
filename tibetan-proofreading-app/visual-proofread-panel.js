@@ -171,16 +171,19 @@
     function renderComparison(container,c,item,piece) {
       const card=element('div',undefined,'visual-candidate-check');card.dataset.verdict=c.state;
       card.append(element('strong',c.label),element('p',c.state==='supported'?'疑似识别错误，请对照原图确认':c.state==='match'?'读图与候选一致，仍可人工核对':c.state==='unaligned'?'无法可靠定位，请对照原图':'读图有分歧，请对照原图'));
-      const text=element('div',undefined,'tibetan-text');let cursor=c.start;
-      if(c.reliable) {
+      if(c.reliable && c.edits.length) {
+        const differences=element('div',undefined,'visual-edit-summary');
         for(const edit of c.edits) {
-          text.append(document.createTextNode(c.text.slice(cursor,edit.start)));
-          const mark=element('mark',edit.original||'〔疑似缺字〕');mark.className=edit.state==='supported'?'visual-model-error':'visual-difference';mark.title=`${edit.type==='extra'?'疑似多字':edit.type==='missing'?'疑似漏字':'疑似替换'}：${edit.suggestion||'〔删除〕'}`;
-          mark.addEventListener('click',event=>{event.stopPropagation();config.onLocate(piece.page_bbox);});text.append(mark);cursor=edit.end;
+          const row=element('div',undefined,'visual-edit-row');
+          const type=edit.type==='extra'?'疑似多字':edit.type==='missing'?'疑似漏字':'疑似替换';
+          row.append(element('small',`${type} · 原识别：`));
+          const mark=element('mark',edit.original||'〔空位〕');mark.className=edit.state==='supported'?'visual-model-error':'visual-difference';mark.title=`${type}：${edit.suggestion||'〔删除〕'}`;
+          mark.addEventListener('click',event=>{event.stopPropagation();config.onLocate(piece.page_bbox);});
+          row.append(mark,element('small',` → 读图建议：${edit.suggestion||'〔删除〕'}`));
+          differences.append(row);
         }
-        text.append(document.createTextNode(c.text.slice(cursor,c.end)));
-      } else text.textContent=c.text;
-      card.append(text);
+        card.append(differences);
+      }
       const evidence=element('details',undefined,'visual-reason-details');evidence.append(element('summary','查看读图建议与判断依据'));
       if(c.proposal)evidence.append(element('small','读图建议（可能错误）：'),element('div',c.proposal,'tibetan-text'));
       for(const p of ['gemini','qwen']) {const vs=item.verifications?.[p]?.verdicts?.filter(v=>(c.optionIds||[c.optionId]).includes(v.id))||[];for(const v of vs)evidence.append(element('p',`${p==='gemini'?'Gemini':'千问'}：${({supports_candidate:'支持原候选',supports_proposal:'支持建议',uncertain:'无法判断'})[v.verdict]}；${v.reason}`));}

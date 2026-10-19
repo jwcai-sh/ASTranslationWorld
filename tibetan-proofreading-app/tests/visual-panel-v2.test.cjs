@@ -40,6 +40,9 @@ test('one blind image reading marks differences and guides manual editing',async
   assert.equal(s.calls.filter(c=>c.endsWith('proofread-verify')).length,0);
   assert.ok(all(s.panel).some(n=>n.className==='visual-difference'));
   assert.equal(all(s.panel).some(n=>n.className==='visual-model-error'),false);
+  const candidateCard=all(s.panel).find(n=>n.className==='visual-candidate-check');
+  assert.ok(all(candidateCard).some(n=>n.className==='visual-edit-summary'));
+  assert.ok(!candidateCard.textContent.includes('ཀཁགངཅ'), '核图证据只显示疑点，不重复完整识别结果');
   assert.equal(s.applied,0);s.click('修改此识别');assert.equal(s.edited,1);
 });
 test('one provider failure never promotes red or completion',async()=>{

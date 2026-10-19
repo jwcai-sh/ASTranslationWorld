@@ -2987,3 +2987,9 @@ body.is-resizing-panes * {
   font-weight: inherit;
   box-shadow: none;
 }
+.proofread-independent-label .optional-model-review { flex: 0 0 auto; font-weight: 400; }
+.proofread-independent-label .optional-model-review > summary { padding: 0; }
+.proofread-independent-label .optional-model-review[open] { padding: 4px 8px; border-radius: 5px; background: #fff; }
+.visual-edit-summary { display: grid; gap: 5px; margin-top: 6px; }
+.visual-edit-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px; }
+.visual-edit-row mark { font-size: 22px; line-height: 1.5; }

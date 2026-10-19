@@ -5725,9 +5725,12 @@ function decorateIndependentProofreadModelSection(group, index, provider, card) 
   title.textContent = `${name}${model && name.toLowerCase() !== model.toLowerCase() ? ` · ${formatProofreadModelLabel(model)}` : ""}`;
   const content = document.createElement("div");
   content.className = "proofread-model-content proofread-independent-content";
+  const optionalReview = group.querySelector(".optional-model-review");
+  if (optionalReview) optionalReview.remove();
   while (group.firstChild) content.appendChild(group.firstChild);
   header.append(title);
   appendProofreadErrorActionsAfterModelSelector(null, renderSharedErrorActionGroup(index, card, provider), header);
+  if (optionalReview) header.append(optionalReview);
   header.append(makeProofreadModelToggle(index, provider, content));
   group.classList.add("proofread-model-section", `is-${provider}`);
   group.replaceChildren(header, content);
@@ -5862,7 +5865,7 @@ function renderIndependentLineReview(provider, index, sourceLine, bdrcLine, aiLi
   const optionalReview = document.createElement('details');
   optionalReview.className = 'optional-model-review';
   const optionalTitle = document.createElement('summary');
-  optionalTitle.textContent = `${label} 重新识别（可选）`;
+  optionalTitle.textContent = '重新识别（可选）';
   optionalReview.append(optionalTitle, controls, feedback);
   group.append(optionalReview);
   const candidate = getOcrSourceCompare(state.ocrResults.get(state.pageNum))?.[reviewKey]?.find((review) => review.index === index);
