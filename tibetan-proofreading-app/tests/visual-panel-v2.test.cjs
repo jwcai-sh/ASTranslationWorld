@@ -75,23 +75,32 @@ test('model reports unclear image never promotes a difference to red',async()=>{
 
 test('one primary action prepares image and checks all fragments with advanced details collapsed',async()=>{
   const s=setup({pieces:2,read:'ཀཁགངཅ'});
-  assert.ok(s.panel.textContent.includes('用原图核对'));
-  s.click('用原图核对');await settle(()=>s.panel.dataset.reviewState==='complete');
+  assert.ok(s.panel.textContent.includes('核对这一行'));
+  s.click('核对这一行');await settle(()=>s.panel.dataset.reviewState==='complete');
   assert.equal(s.calls.filter(c=>c.endsWith('proofread-prepare')).length,1);
   assert.equal(s.calls.filter(c=>c.endsWith('proofread-read')).length,2);
   assert.equal(all(s.panel).filter(n=>n.className==='visual-coverage').length,0);
   assert.ok(all(s.panel).some(n=>n.className==='visual-advanced' && !n.open));
+  assert.ok(all(s.panel).some(n=>n.className==='visual-evidence-details' && !n.open));
+});
+
+test('recheck reruns a completed row rather than doing nothing',async()=>{
+  const s=setup({read:'ཀཁགངཅ'});
+  s.click('核对这一行');await settle(()=>s.panel.dataset.reviewState==='complete');
+  assert.equal(s.calls.filter(c=>c.endsWith('proofread-read')).length,1);
+  s.click('重新核对');await settle(()=>s.calls.filter(c=>c.endsWith('proofread-read')).length===2);
+  assert.equal(s.calls.filter(c=>c.endsWith('proofread-read')).length,2);
 });
 
 test('another vision provider is optional and still makes one image call',async()=>{
   const s=setup();const select=all(s.panel).find(n=>n.tag==='select');select.value='qwen:mock';
-  s.click('用原图核对');await settle(()=>s.panel.dataset.reviewState==='complete');
+  s.click('核对这一行');await settle(()=>s.panel.dataset.reviewState==='complete');
   assert.deepEqual(s.providers.filter(Boolean),['qwen']);
   assert.equal(s.calls.filter(c=>c.endsWith('proofread-verify')).length,0);
 });
 test('unlocatable image reading leaves OCR text unmarked',async()=>{
   const s=setup({read:'ཨཨཨཨཨཨཨཨ'});
-  s.click('用原图核对');await settle(()=>s.panel.dataset.reviewState==='complete');
+  s.click('核对这一行');await settle(()=>s.panel.dataset.reviewState==='complete');
   assert.ok(s.panel.textContent.includes('无法可靠定位'));
   assert.equal(all(s.panel).some(n=>n.className==='visual-difference'),false);
   assert.equal(all(s.panel).some(n=>n.tag==='button'&&n.textContent==='手动修改此识别'),true);

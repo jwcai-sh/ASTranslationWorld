@@ -24,13 +24,15 @@
   function create(config) {
     const section=element('section',undefined,'line-vision-proofread visual-proofread-v2');
     section.dataset.reviewState='idle';
-    const header=element('div',undefined,'line-vision-header');header.append(element('strong','第 2 步 · 原图核对','line-vision-heading'));
-    const feedback=element('div','先点顶部“识别”，再点“用原图核对”。每个原图片段只调用一个核图模型一次；黄色差异留待人工确认。','line-vision-feedback');feedback.setAttribute('role','status');feedback.setAttribute('aria-live','polite');
+    const header=element('div',undefined,'line-vision-header');header.append(element('strong','原图核对','line-vision-heading'));
+    const feedback=element('div','核图后只提示待确认的差异。','line-vision-feedback');feedback.setAttribute('role','status');feedback.setAttribute('aria-live','polite');
     const controls=element('div',undefined,'visual-review-controls');
     const advanced=element('details',undefined,'visual-advanced');advanced.append(element('summary','更多选项与核图记录'));
     const selectionSlot=element('div');
     const roster=element('div',undefined,'visual-roster');
     const body=element('div',undefined,'line-vision-results');
+    const evidence=element('details',undefined,'visual-evidence-details');
+    const evidenceTitle=element('summary','查看原图依据与设置');
     const cacheStatus=element('small','校对记录保存在本机浏览器；可导出备份。','visual-cache-status');
     let prepared=null, report=null, imports=[], controller=null, busy=false, originalBlob=null, sourceSnapshot='', restoreDone=false;
     const selected=new Set();
@@ -83,11 +85,12 @@
     const quickButton=button('快速疑点核查（所选片段）',()=>run('selected'));
     const fullButton=button('全行逐字复核',()=>run('full'));
     const retryButton=button('重试未完成片段',()=>run('retry'));
-    const startButton=button('用原图核对',async()=>{
+    const startButton=button('核对这一行',async()=>{
       if(busy)return;
       if(!prepared && !await prepareRegion())return;
       const hasCompleted=Object.values(report?.items||{}).some(item=>item.status==='done');
-      await run(hasCompleted?'retry':'full');
+      const hasPending=prepared.fragments.some(piece=>report?.items?.[piece.id]?.status!=='done');
+      await run(hasCompleted&&hasPending?'retry':'full');
     });startButton.className='visual-start-button';
     const stopButton=button('停止',stop);stopButton.disabled=true;
     const exportButton=button('导出校对证据',()=>{
@@ -98,18 +101,20 @@
     });
     const primary=element('div',undefined,'visual-primary-controls');primary.append(startButton,stopButton);
     controls.append(prepareButton,quickButton,fullButton,retryButton,exportButton);
-    const importBox=element('details');importBox.append(element('summary','加入聊天模式候选（粘贴当前 block 的完整文本）'));
+    const importBox=element('details');importBox.append(element('summary','加入聊天模式候选（粘贴当前行的完整文本）'));
     const labelInput=element('input');labelInput.placeholder='来源 / 模型名称';labelInput.setAttribute('aria-label','聊天候选来源');
-    const textInput=element('textarea');textInput.className='tibetan-text';textInput.placeholder='仅粘贴本 block 对应的藏文；多行按原图顺序。';textInput.setAttribute('aria-label','聊天候选文本');
+    const textInput=element('textarea');textInput.className='tibetan-text';textInput.placeholder='仅粘贴本行对应的藏文。';textInput.setAttribute('aria-label','聊天候选文本');
     const importButton=button('加入候选',async()=>{
-      if(!labelInput.value.trim()||!textInput.value.trim())return status('请填写来源和本 block 的藏文。','error');
-      if(candidates().length>=16)return status('当前 block 最多支持 16 份候选。','error');
+      if(!labelInput.value.trim()||!textInput.value.trim())return status('请填写来源和本行的藏文。','error');
+      if(candidates().length>=16)return status('当前行最多支持 16 份候选。','error');
       restoreDone=true;
       imports.push({id:`import-${Date.now()}`,label:labelInput.value.trim(),text:textInput.value,source:'chat',importedAt:new Date().toISOString()});
       report=null;sourceSnapshot=fingerprint();textInput.value='';render();await persist();status('候选已加入；按当前原图重新核查。');
     });importBox.append(labelInput,textInput,importButton);
     advanced.append(controls,importBox,roster,selectionSlot,cacheStatus);
-    section.append(header,primary,feedback,advanced,body);
+    header.append(primary);
+    evidence.append(evidenceTitle,body,advanced);
+    section.append(header,feedback,evidence);
     if(!config.bbox){startButton.disabled=prepareButton.disabled=quickButton.disabled=fullButton.disabled=true;status('没有可用的原图区域坐标。','error');}
 
     function render() {
@@ -159,8 +164,9 @@
     function coverage() {
       const items=Object.values(report?.items||{});const done=items.filter(i=>i.status==='done').length;
       const unresolved=items.flatMap(i=>i.comparisons||[]).filter(c=>c.state!=='supported' && c.state!=='match').length;
-      startButton.textContent=report && !report.models?.provider?'重新核对':done && done<prepared.fragments.length?'继续核对':done===prepared.fragments.length?'重新核对':'用原图核对';
-      return `已核对 ${done}/${prepared.fragments.length} 个片段 · ${unresolved} 项待人工查看。${report?.mode==='selected'?'本次只核对了所选片段。':''}${report&&report.snapshot!==fingerprint()?'文字已改变，请重新核对。':''}`;
+      startButton.textContent=report && !report.models?.provider?'重新核对':done && done<prepared.fragments.length?'继续核对':done===prepared.fragments.length?'重新核对':'核对这一行';
+      evidenceTitle.textContent=`查看原图依据与设置${unresolved?`（${unresolved} 项待看）`:''}`;
+      return `已核对 ${done}/${prepared.fragments.length} 处原图；${unresolved} 项差异待人工查看。${report?.mode==='selected'?'本次仅检查所选范围。':''}${report&&report.snapshot!==fingerprint()?'文字已改变，请重新核对。':''}`;
     }
     function renderComparison(container,c,item,piece) {
       const card=element('div',undefined,'visual-candidate-check');card.dataset.verdict=c.state;
@@ -218,7 +224,7 @@
     async function run(mode) {
       if(busy)return;
       if(!prepared)return status('请先点击“准备原图 / 重新分行”。');
-      if(!candidates().length)return status('请先识别或导入当前 block 的候选文本。','error');
+      if(!candidates().length)return status('请先识别或导入当前行的候选文本。','error');
       if(!config.isCurrent())return status('页面已改变，请重新打开校对。','error');
       setBusy(true);
       try {await verifySource();} catch(error){setBusy(false);status(error.message,'error');return;}

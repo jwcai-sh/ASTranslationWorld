@@ -5106,7 +5106,7 @@ function renderOcrLineComparison() {
 
     const preview = document.createElement("div");
     preview.className = "ocr-line-preview";
-    if (line.deleted) preview.textContent = "此 block 的 OCR 结果已删除；可在校对视图撤销。";
+    if (line.deleted) preview.textContent = "此行的 OCR 结果已删除；可在校对视图撤销。";
     else renderOcrLineMarkup(preview, line.text || "", {manualEditRanges: getManualEditRanges(line)});
 
     const editor = document.createElement("textarea");
@@ -5155,7 +5155,7 @@ function renderProofreadMergedView() {
   if (!state.pageCount) {
     const empty = document.createElement("div");
     empty.className = "line-compare-empty";
-    empty.innerHTML = "<strong>等待加载文件</strong><span>加载 PDF 或图片后，这里会按 block 显示原文和 Gemini Vision 结果。</span>";
+    empty.innerHTML = "<strong>等待加载文件</strong><span>加载 PDF 或图片后，这里会逐行显示原文和各模型识别结果。</span>";
     els.ocrLineCompare.appendChild(empty);
     renderAiOcrPanelForPage();
     return;
@@ -5176,7 +5176,7 @@ function renderProofreadMergedView() {
   if (!rowCount) {
     const empty = document.createElement("div");
     empty.className = "line-compare-empty";
-    empty.innerHTML = "<strong>等待识别</strong><span>点击“识别”后，每个原文 block 下方会出现可编辑的 Gemini Vision 结果。</span>";
+    empty.innerHTML = "<strong>等待识别</strong><span>点击“识别”后，每行下方会出现可编辑的模型结果。</span>";
     els.ocrLineCompare.appendChild(empty);
     return;
   }
@@ -5242,8 +5242,8 @@ function setProofreadBlockDeleted(index, deleted) {
   updateSummary();
   updateThumbnailState();
   setStatus(saved
-    ? (deleted ? `已删除并自动保存第 ${index + 1} 个 block 的 OCR 结果；原文保留，可撤销。` : `已恢复并自动保存第 ${index + 1} 个 block 的 OCR 结果。`)
-    : `第 ${index + 1} 个 block 的删除状态未能保存，请重试。`, saved ? "ok" : "error");
+    ? (deleted ? `已删除并自动保存第 ${index + 1} 行的 OCR 结果；原文保留，可撤销。` : `已恢复并自动保存第 ${index + 1} 行的 OCR 结果。`)
+    : `第 ${index + 1} 行的删除状态未能保存，请重试。`, saved ? "ok" : "error");
   return saved;
 }
 
@@ -5251,12 +5251,12 @@ function renderDeletedProofreadBlockCard(index) {
   const notice = document.createElement("div");
   notice.className = "proofread-deleted-block-notice";
   const message = document.createElement("span");
-  message.textContent = "此 block 的 OCR 结果已从当前页文本中移除，原文与候选仍保留。";
+  message.textContent = "此行的 OCR 结果已从当前页文本中移除，原文与候选仍保留。";
   const restore = document.createElement("button");
   restore.className = "ghost-button compact proofread-restore-block-button";
   restore.type = "button";
   restore.innerHTML = '<i data-lucide="undo-2"></i><span>撤销删除</span>';
-  restore.setAttribute("aria-label", `撤销删除第 ${index + 1} 个 block`);
+  restore.setAttribute("aria-label", `撤销删除第 ${index + 1} 行`);
   restore.addEventListener("click", (event) => {
     event.stopPropagation();
     setProofreadBlockDeleted(index, false);
@@ -5269,9 +5269,9 @@ function renderDeleteProofreadBlockButton(index) {
   const button = document.createElement("button");
   button.className = "ghost-button compact proofread-delete-block-button";
   button.type = "button";
-  button.innerHTML = '<i data-lucide="trash-2"></i><span>删除 block</span>';
-  button.title = "从当前页 OCR 结果和导出文本中移除这个 block；可在原位撤销";
-  button.setAttribute("aria-label", `删除第 ${index + 1} 个 block 识别结果`);
+  button.innerHTML = '<i data-lucide="trash-2"></i><span>删除此行</span>';
+  button.title = "从当前页 OCR 结果和导出文本中移除这一行；可在原位撤销";
+  button.setAttribute("aria-label", `删除第 ${index + 1} 行识别结果`);
   button.addEventListener("mousedown", (event) => event.preventDefault());
   button.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -5307,7 +5307,7 @@ function renderProofreadBlockCard({ index, bdrcLine, aiLine, finalLine, sourceLi
   const hasPreciseSourceLine = Boolean(sourceLine?.bbox && !sourceLine.estimated);
   card.classList.toggle("has-source-line", hasPreciseSourceLine);
   card.title = hasPreciseSourceLine
-    ? `点击同步左栏第 ${index + 1} 个${regionLabel ? `${regionLabel} ` : ""}原文 block`
+    ? `点击定位左栏第 ${index + 1} 行原图`
     : "";
   card.classList.toggle("is-active", state.activeOcrLine === index);
 
@@ -5350,7 +5350,13 @@ function renderProofreadBlockCard({ index, bdrcLine, aiLine, finalLine, sourceLi
     );
     if (!saveProofreadBlockChoice(index, event.target.value, card)) event.target.value = previous;
   });
-  options.append(choiceSelect, autoSaveStatus, renderDeleteProofreadBlockButton(index));
+  const riskToggle = document.createElement("label");
+  riskToggle.className = "proofread-risk-toggle";
+  const riskCheckbox = document.createElement("input");
+  riskCheckbox.type = "checkbox";
+  riskCheckbox.addEventListener("change", () => card.classList.toggle("show-risk-marks", riskCheckbox.checked));
+  riskToggle.append(riskCheckbox, document.createTextNode("显示自动疑字"));
+  options.append(riskToggle, choiceSelect, autoSaveStatus, renderDeleteProofreadBlockButton(index));
 
   const stack = document.createElement("div");
   stack.className = "proofread-editor-stack";
@@ -5380,10 +5386,22 @@ function renderProofreadBlockCard({ index, bdrcLine, aiLine, finalLine, sourceLi
   stack.querySelectorAll(".proofread-editor-group").forEach((group) => {
     decorateProofreadModelSection(group, index, group.classList.contains("is-bdrc") ? "bdrc" : "llm", card);
   });
-  stack.append(
-    decorateIndependentProofreadModelSection(renderQwenLineReview(index, sourceLine, bdrcLine, aiLine), index, "qwen", card),
-    decorateIndependentProofreadModelSection(renderOpenAiLineReview(index, sourceLine, bdrcLine, aiLine), index, "openai", card),
-  );
+  const additionalSources = document.createElement("details");
+  additionalSources.className = "proofread-additional-sources";
+  const additionalSourcesTitle = document.createElement("summary");
+  additionalSourcesTitle.textContent = "识别其他模型（可选）";
+  additionalSources.append(additionalSourcesTitle);
+  for (const [provider, group] of [
+    ["qwen", renderQwenLineReview(index, sourceLine, bdrcLine, aiLine)],
+    ["openai", renderOpenAiLineReview(index, sourceLine, bdrcLine, aiLine)],
+  ]) {
+    if (group.querySelector(".openai-review-candidate")) {
+      stack.append(decorateIndependentProofreadModelSection(group, index, provider, card));
+    } else {
+      additionalSources.append(group);
+    }
+  }
+  if (additionalSources.children.length > 1) options.append(additionalSources);
 
   const activate = () => {
     if (!hasPreciseSourceLine) return;
@@ -5396,7 +5414,7 @@ function renderProofreadBlockCard({ index, bdrcLine, aiLine, finalLine, sourceLi
   });
 
   const sourcePanel = renderProofreadSourcePanel(sourceLine, index);
-  card.append(sourcePanel, renderLineVisionProofread(index, sourceLine), stack, options);
+  card.append(sourcePanel, stack, renderLineVisionProofread(index, sourceLine), options);
   card.addEventListener("input", (event) => {
     if (!event.target.closest(".proofread-editor, .openai-review-candidate")) return;
     const review = card.querySelector(".line-vision-proofread");
@@ -5618,7 +5636,7 @@ function renderProofreadChoiceSelect(index, savedSide, candidateLabel = "Gemini 
   const select = document.createElement("select");
   select.className = "proofread-choice-select";
   select.name = `proofread-choice-${state.pageNum}-${index}`;
-  select.setAttribute("aria-label", `第 ${index + 1} 个 block 采用版本`);
+  select.setAttribute("aria-label", `第 ${index + 1} 行采用版本`);
   const choices = [["bdrc", "BDRC"], ["llm", candidateLabel]];
   if (compare?.qwenReviews?.some((review) => review.index === index && review.alignmentStatus !== "pending-review")) choices.push(["qwen", "千问候选"]);
   if (compare?.openaiReviews?.some((review) => review.index === index)) choices.push(["openai", "OpenAI 候选"]);
@@ -5699,7 +5717,12 @@ function decorateIndependentProofreadModelSection(group, index, provider, card) 
   const header = document.createElement("div");
   header.className = "proofread-editor-label proofread-independent-label";
   const title = document.createElement("strong");
-  title.textContent = `${proofreadModelName(provider)} block ${String(index + 1).padStart(2, "0")} 识别`;
+  const reviewKey = provider === "qwen" ? "qwenReviews" : "openaiReviews";
+  const candidate = getOcrSourceCompare(state.ocrResults.get(state.pageNum))?.[reviewKey]
+    ?.find((review) => review.index === index);
+  const model = String(candidate?.model || "").trim();
+  const name = provider === "openai" && /gpt[\s-]*6/i.test(model) ? "GPT-6" : proofreadModelName(provider);
+  title.textContent = `${name}${model && name.toLowerCase() !== model.toLowerCase() ? ` · ${formatProofreadModelLabel(model)}` : ""}`;
   const content = document.createElement("div");
   content.className = "proofread-model-content proofread-independent-content";
   while (group.firstChild) content.appendChild(group.firstChild);
@@ -5899,6 +5922,11 @@ function renderIndependentLineReview(provider, index, sourceLine, bdrcLine, aiLi
     };
     updateCandidateQuality();
     group.append(text, quality);
+function formatProofreadModelLabel(model) {
+  const value = String(model || "").replace(/^(gemini|qwen|openai):/i, "");
+  return value.replace(/^gemini-/i, "").replace(/-/g, " ");
+}
+
   }
   button.addEventListener("click", async (event) => {
     event.stopPropagation();
@@ -6246,14 +6274,8 @@ function renderProofreadSourcePanel(sourceLine, index) {
   const header = document.createElement("div");
   header.className = "proofread-source-header";
   const title = document.createElement("strong");
-  const regionLabel = sourceLine?.regionLabel ? `${sourceLine.regionLabel} ` : "";
-  const regionLineCount = Number(sourceLine?.regionLineCount || 0);
-  const regionCountLabel = regionLineCount > 1 ? `（${regionLineCount}行）` : "";
-  title.textContent = sourceLine?.bboxApproximate
-    ? `${regionLabel}原文 block ${String(index + 1).padStart(2, "0")} 预览（合并定位）${regionCountLabel}`
-    : `${regionLabel}原文 block ${String(index + 1).padStart(2, "0")} 预览${regionCountLabel}`;
+  title.textContent = `第 ${index + 1} 行 · 原文裁图${sourceLine?.bboxApproximate ? "（位置待确认）" : ""}`;
   header.append(title);
-  if (!isTraditionalSide) header.append(renderSourcePreviewScaleControls());
   panel.appendChild(header);
 
   const isTraditionalLeft = isTraditionalSide
@@ -6276,7 +6298,7 @@ function renderProofreadSourcePanel(sourceLine, index) {
       ? "右侧暂不显示单行裁剪预览。"
       : sourceLine?.estimated
       ? "暂无可靠定位坐标，请在左栏查看整页原文。"
-      : "当前 block 没有可用坐标预览，可在左栏查看整页原文。";
+      : "当前行没有可用坐标预览，可在左栏查看整页原文。";
     panel.appendChild(fallback);
   }
 
@@ -6536,26 +6558,19 @@ function createModelInputPreview(sourceLine, index) {
       wrapper.appendChild(note);
       const strip = document.createElement("div");
       strip.style.display = "flex";
-      strip.style.width = "max-content";
-      let previewHeight = 0;
+      strip.style.width = "100%";
       for (const [tileIndex, url] of previewImages.entries()) {
         const img = document.createElement("img");
         img.src = url;
-        img.alt = `单行裁剪第 ${tileIndex + 1} 段`;
-        const size = payload.review_image?.review_size;
-        const displayHeight = linePreviewDisplayHeight(
-          wrapper.clientWidth,
-          size,
-          Number(state.sourcePreviewScale) || 1,
-        );
-        img.style.height = `${displayHeight}px`;
-        previewHeight = Math.max(previewHeight, displayHeight);
-        img.style.width = "auto";
-        img.style.maxWidth = "none";
+        img.alt = previewImages.length === 1
+          ? `第 ${index + 1} 行完整原文裁图`
+          : `第 ${index + 1} 行原文裁图第 ${tileIndex + 1} 段`;
+        img.style.width = previewImages.length === 1 ? "100%" : `${100 / previewImages.length}%`;
+        img.style.height = "auto";
         strip.appendChild(img);
       }
       wrapper.style.height = "auto";
-      wrapper.style.minHeight = `${Math.ceil(previewHeight + 38)}px`;
+      wrapper.style.minHeight = "0";
       wrapper.style.overflowY = "visible";
       strip.dataset.cropStrip = "true";
       wrapper.appendChild(strip);
@@ -6563,7 +6578,7 @@ function createModelInputPreview(sourceLine, index) {
       if (Number.isInteger(rowIndex)) {
         wrapper.dataset.physicalRowKey = JSON.stringify([payload.review_image.source_size, rowIndex]);
         wrapper.dataset.blockIndex = String(index);
-        wrapper.dataset.previewHeight = wrapper.style.minHeight;
+        wrapper.dataset.previewHeight = "0px";
         mergeDuplicateSourcePreviews(wrapper.closest("#ocrLineCompare"));
       }
     } catch (error) {
@@ -6599,7 +6614,7 @@ function mergeDuplicateSourcePreviews(root) {
     }
     note.hidden = !owner;
     if (owner) {
-    note.textContent = `与 block ${String(Number(owner.dataset.blockIndex) + 1).padStart(2, "0")} 对应同一原文行；识别结果已在 block ${String(Number(owner.dataset.blockIndex) + 1).padStart(2, "0")} 显示。`;
+      note.textContent = `与第 ${Number(owner.dataset.blockIndex) + 1} 行对应同一原文；识别结果已在该行显示。`;
     } else {
       owners.set(preview.dataset.physicalRowKey, preview);
     }
@@ -6705,15 +6720,13 @@ function formatLineQualityStats(stats) {
 function renderProofreadEditorGroup({ index, side, label, line, peerLine, compare }) {
   const group = document.createElement("div");
   group.className = `proofread-editor-group ${side === "llm" ? "is-ai" : "is-bdrc"}`;
-  const blockNumber = String(index + 1).padStart(2, "0");
   const sourceLabel = side === "llm" ? "Gemini Vision" : "BDRC";
-  const regionLabel = line?.regionLabel ? `${line.regionLabel} ` : "";
-  const regionLineCount = Number(line?.regionLineCount || 0);
 
   const labelEl = document.createElement("div");
   labelEl.className = "proofread-editor-label";
   const labelTitle = document.createElement("strong");
-  labelTitle.textContent = `${sourceLabel} ${regionLabel}block ${blockNumber} 识别${regionLineCount > 1 ? `（${regionLineCount}行）` : ""}`;
+  const model = side === "llm" ? String(line?.model || "").trim() : "";
+  labelTitle.textContent = `${sourceLabel}${model ? ` · ${formatProofreadModelLabel(model)}` : ""}`;
   const labelMeta = document.createElement("span");
   labelMeta.textContent = `${sourceLabel} 识别结果`;
   const statusEl = document.createElement("em");
@@ -6735,8 +6748,8 @@ function renderProofreadEditorGroup({ index, side, label, line, peerLine, compar
   editor.spellcheck = false;
   editor.setAttribute("role", "textbox");
   editor.setAttribute("aria-multiline", "true");
-  editor.setAttribute("aria-label", `第 ${index + 1} 个 block 的 ${label}`);
-  editor.dataset.placeholder = `${sourceLabel} block ${blockNumber} 未返回`;
+  editor.setAttribute("aria-label", `第 ${index + 1} 行的 ${label}`);
+  editor.dataset.placeholder = `第 ${index + 1} 行 ${sourceLabel} 尚无识别结果`;
   editor.dataset.proofreadSide = side;
   editor.dataset.sourceRowIndex = String(index);
   const editorBody = document.createElement("div");
@@ -6773,6 +6786,7 @@ function renderProofreadEditorGroup({ index, side, label, line, peerLine, compar
       editor.textContent = editor.dataset.placeholder;
     }
   };
+      strip.className = "proofread-source-overview";
   const syncEditorValue = (fromUserInput = false) => {
     if (isDiagnosticOcrLine(line) && !fromUserInput) {
       resizeLineEditor(editor);
@@ -6797,6 +6811,20 @@ function renderProofreadEditorGroup({ index, side, label, line, peerLine, compar
     editor.classList.toggle("is-empty", !String(value || "").trim());
     editor.classList.toggle("is-diagnostic", isDiagnosticOcrLine(line));
     resizeLineEditor(editor);
+      if (previewImages.length === 1) {
+        const zoom = document.createElement("details");
+        zoom.className = "proofread-source-zoom";
+        const summary = document.createElement("summary");
+        summary.textContent = "放大查看这一行";
+        const scroll = document.createElement("div");
+        scroll.className = "proofread-source-zoom-scroll";
+        const fullImage = document.createElement("img");
+        fullImage.src = previewImages[0];
+        fullImage.alt = `第 ${index + 1} 行原始细节裁图`;
+        scroll.append(fullImage);
+        zoom.append(summary, scroll);
+        wrapper.append(zoom);
+      }
   };
   renderEditorMarkup();
 
